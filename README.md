@@ -200,6 +200,33 @@ All settings are editable via the web dashboard at `http://venus.local:8088` or 
 | Enabled | Yes | Enable/disable scheduling |
 | Run Now | — | Manual trigger (web UI button) |
 
+## Safety Features
+
+The service includes multiple safety guards to protect batteries on an unattended vessel:
+
+| Guard | Trigger | Action |
+|-------|---------|--------|
+| **Crash-safe CVL** | Service crash before relay opens | Temp service registers at 28.4V (safe for LFPs), only raised to 31.2V after relay confirmed open |
+| **Delta-aware relay** | `finally` block on any abort | Only closes relay if voltage delta < 2V; otherwise raises alarm, leaves LFPs on Orion |
+| **Startup recovery** | Service restart with relay open | Checks delta: auto-closes if < 2V, alarms if > 2V |
+| **Relay verification** | After every relay command | Reads back relay state; aborts if command didn't execute |
+| **Orion failure detection** | LFP voltage drops > 0.5V during EQ | Aborts and reconnects |
+| **Inrush monitoring** | After relay reconnect | Logs inrush current and delta for calibration |
+| **SoC enforcement** | RunNow bypasses interval, not SoC | LFP SoC >= 95% always required |
+| **SmartShunt watchdog** | SmartShunt Trojan goes offline | Immediate abort in both EQ and voltage matching |
+| **Current monitoring** | Trojan current > 60A during EQ | Warning logged (dynamo/MPPT contribution) |
+| **Bounds validation** | Web UI settings changes | Values checked against min/max before writing |
+
+## Testing
+
+Run the test suite from the repo root:
+
+```bash
+python3 -m unittest fla-equalisation/tests/test_fla_equalisation.py -v
+```
+
+26 tests covering: scheduling logic, safety guards, crash safety, inrush protection, startup recovery, and settings validation.
+
 ## EVE MB31 Key Specs
 
 | Parameter | Value |
@@ -226,6 +253,7 @@ zwartewater-victron/
 │   └── superpowers/plans/      # Implementation plan
 └── fla-equalisation/
     ├── install.sh              # Venus OS installer
+    ├── install-remote.sh       # Remote installer (wget one-liner)
     ├── fla_equalisation.py     # Main service (persistent, GLib loop)
     ├── dbus_battery_service.py # Temporary battery service for DVCC
     ├── dbus_monitor.py         # SmartShunt + relay D-Bus readings
@@ -233,6 +261,8 @@ zwartewater-victron/
     ├── settings.py             # Venus OS settings integration
     ├── alerting.py             # Buzzer + alarm
     ├── web_server.py           # Web dashboard (port 8088)
-    └── service/
-        └── run                 # Daemontools service runner
+    ├── service/
+    │   └── run                 # Daemontools service runner
+    └── tests/
+        └── test_fla_equalisation.py  # 26 unit tests
 ```
