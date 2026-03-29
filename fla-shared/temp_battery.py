@@ -18,18 +18,18 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"
 from vedbus import VeDbusService
 
 
-def get_private_bus():
-    """Get a private (non-shared) bus connection to avoid path conflicts."""
+def get_bus():
+    """Get the shared system bus — required for DVCC to discover this service."""
     if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
-        return dbus.SessionBus(private=True)
-    return dbus.SystemBus(private=True)
+        return dbus.SessionBus()
+    return dbus.SystemBus()
 
 
 class TempBatteryService:
     """Temporary D-Bus battery service for DVCC control during equalisation."""
 
     def __init__(self, device_instance=100):
-        self._bus = get_private_bus()
+        self._bus = get_bus()
         self._service = VeDbusService(
             "com.victronenergy.battery.fla_equalisation",
             self._bus,
@@ -124,15 +124,10 @@ class TempBatteryService:
         except Exception as e:
             log.warning("Error setting Connected=0: %s", e)
         try:
-            # Release the D-Bus name so other services don't see a stale registration
+            # Release the D-Bus name so DVCC stops seeing this service
             self._bus.release_name("com.victronenergy.battery.fla_equalisation")
         except Exception as e:
             log.warning("Error releasing D-Bus name: %s", e)
-        try:
-            self._bus.close()
-        except Exception as e:
-            log.warning("Error closing private bus: %s", e)
         self._service = None
-        self._bus = None
         self._registered = False
         log.info("Temporary battery service deregistered")
