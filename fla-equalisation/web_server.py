@@ -1,0 +1,265 @@
+"""Simple web UI for FLA equalisation status and control.
+
+Serves a single-page dashboard at port 8088 on the Cerbo GX.
+Access via http://venus.local:8088
+
+Data is read from a shared cache dict updated by the main GLib loop,
+avoiding cross-thread D-Bus calls.
+"""
+
+import json
+import logging
+import os
+import sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
+
+log = logging.getLogger(__name__)
+
+PORT = 8088
+
+# Shared cache — written by GLib thread, read by HTTP thread
+_cache = {
+    "state": None,
+    "time_remaining": 0,
+    "trojan_voltage": None,
+    "lfp_voltage": None,
+    "voltage_delta": None,
+    "last_equalisation": None,
+    "days_until_next": None,
+    "settings": {},
+    "run_now_requested": False,
+}
+
+HTML_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>FLA Equalisation</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #0d1b2a; color: #e0e0e0;
+         padding: 12px; max-width: 480px; margin: 0 auto; font-size: 14px; }
+  h1 { color: #f0f4fc; margin-bottom: 12px; font-size: 1.2em; }
+  .card { background: #1b2838; border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+  .card h2 { color: #8bb4d9; font-size: 0.85em; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+  .row { display: flex; justify-content: space-between; align-items: center;
+         padding: 5px 0; border-bottom: 1px solid #253546; }
+  .row:last-child { border-bottom: none; }
+  .label { color: #8899aa; font-size: 0.9em; }
+  .value { color: #f0f4fc; font-weight: 600; font-size: 0.9em; }
+  .value.idle { color: #4caf50; }
+  .value.active { color: #ff9800; }
+  .value.error { color: #f44336; }
+  .btn { display: inline-block; background: #152b4e; color: #f0f4fc; border: 1px solid #2a4a7a;
+         padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 0.9em; margin-top: 4px; }
+  .btn:hover { background: #1e3a66; }
+  .btn:active { background: #0d1b2a; }
+  input.si { background: #0d1b2a; border: 1px solid #2a4a7a; color: #f0f4fc;
+    padding: 3px 6px; border-radius: 4px; width: 60px; font-size: 0.9em; text-align: right; }
+  input.si:focus { border-color: #4a8ad9; outline: none; }
+  select.si { background: #0d1b2a; border: 1px solid #2a4a7a; color: #f0f4fc;
+    padding: 3px 6px; border-radius: 4px; width: 70px; font-size: 0.9em; }
+  .ok { color: #4caf50; font-size: 0.8em; margin-left: 4px; }
+  .unit { color: #667; font-size: 0.85em; margin-left: 2px; }
+  .updated { color: #556677; font-size: 0.75em; margin-top: 8px; text-align: center; }
+</style>
+</head>
+<body>
+<h1>FLA Equalisation</h1>
+
+<div class="card">
+  <h2>Status</h2>
+  <div class="row"><span class="label">State</span><span class="value" id="state">-</span></div>
+  <div class="row"><span class="label">Time remaining</span><span class="value" id="time">-</span></div>
+  <div class="row"><span class="label">Last equalisation</span><span class="value" id="last">-</span></div>
+  <div class="row"><span class="label">Next due in</span><span class="value" id="next">-</span></div>
+</div>
+
+<div class="card">
+  <h2>Voltages</h2>
+  <div class="row"><span class="label">Trojan FLA</span><span class="value" id="vtrojan">-</span></div>
+  <div class="row"><span class="label">EVE LFP</span><span class="value" id="vlfp">-</span></div>
+  <div class="row"><span class="label">Delta</span><span class="value" id="delta">-</span></div>
+</div>
+
+<div class="card">
+  <h2>Settings</h2>
+  <div class="row"><span class="label">EQ voltage</span><span><input class="si" id="s_eqv" data-key="eq_voltage" data-type="f"><span class="unit">V</span><span class="ok" id="ok_eq_voltage"></span></span></div>
+  <div class="row"><span class="label">Complete current</span><span><input class="si" id="s_eqi" data-key="eq_current_complete" data-type="f"><span class="unit">A</span><span class="ok" id="ok_eq_current_complete"></span></span></div>
+  <div class="row"><span class="label">Max duration</span><span><input class="si" id="s_timeout" data-key="eq_timeout_hours" data-type="f"><span class="unit">hrs</span><span class="ok" id="ok_eq_timeout_hours"></span></span></div>
+  <div class="row"><span class="label">Float voltage</span><span><input class="si" id="s_float" data-key="float_voltage" data-type="f"><span class="unit">V</span><span class="ok" id="ok_float_voltage"></span></span></div>
+  <div class="row"><span class="label">Max reconnect delta</span><span><input class="si" id="s_delta" data-key="voltage_delta_max" data-type="f"><span class="unit">V</span><span class="ok" id="ok_voltage_delta_max"></span></span></div>
+  <div class="row"><span class="label">Interval</span><span><input class="si" id="s_days" data-key="days_between" data-type="i"><span class="unit">days</span><span class="ok" id="ok_days_between"></span></span></div>
+  <div class="row"><span class="label">Start hour</span><span><input class="si" id="s_start" data-key="start_hour" data-type="i"><span class="unit">:00</span><span class="ok" id="ok_start_hour"></span></span></div>
+  <div class="row"><span class="label">End hour</span><span><input class="si" id="s_end" data-key="end_hour" data-type="i"><span class="unit">:00</span><span class="ok" id="ok_end_hour"></span></span></div>
+  <div class="row"><span class="label">Min LFP SoC</span><span><input class="si" id="s_soc" data-key="lfp_soc_min" data-type="i"><span class="unit">%</span><span class="ok" id="ok_lfp_soc_min"></span></span></div>
+  <div class="row"><span class="label">Enabled</span><span><select class="si" id="s_enabled" data-key="enabled" data-type="i"><option value="1">Yes</option><option value="0">No</option></select><span class="ok" id="ok_enabled"></span></span></div>
+</div>
+
+<div class="card">
+  <h2>Control</h2>
+  <button class="btn" onclick="runNow()">Run Equalisation Now</button>
+  <span id="run_msg" style="margin-left: 8px; color: #8899aa; font-size:0.85em;"></span>
+</div>
+
+<div class="updated" id="updated"></div>
+
+<script>
+var STATES = {0:"Idle", 1:"Stopping driver", 2:"Disconnecting LFP",
+  3:"Equalising FLA", 4:"Cooling down", 5:"Voltage matching",
+  6:"Reconnecting LFP", 7:"Restarting driver", 8:"Error"};
+var initialLoad = true;
+
+function sc(s) { return s===0?"idle":s===8?"error":"active"; }
+function fmt(v,u,d) { return (v==null||v==undefined)? "-" : parseFloat(v).toFixed(d||2)+" "+(u||""); }
+function fmtT(s) { if(!s||s<=0) return "-"; var m=Math.floor(s/60),h=Math.floor(m/60); return h>0?h+"h "+(m%60)+"m":m+"m"; }
+function si(id,v) { var e=document.getElementById(id); if(e&&(initialLoad||document.activeElement!==e)) e.value=v!=null?v:""; }
+
+function save(key,value,type) {
+  var v = type==="i" ? parseInt(value) : parseFloat(value);
+  if (isNaN(v)) return;
+  fetch("/api/setting",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({key:key,value:v})}).then(function(r){return r.json()}).then(function(){
+    var ok=document.getElementById("ok_"+key);
+    if(ok){ok.textContent="saved";setTimeout(function(){ok.textContent="";},2000);}
+  });
+}
+
+document.addEventListener("DOMContentLoaded",function(){
+  document.querySelectorAll(".si").forEach(function(el){
+    el.addEventListener("change",function(){save(el.dataset.key,el.value,el.dataset.type);});
+  });
+});
+
+function refresh() {
+  fetch("/api/status").then(function(r){return r.json()}).then(function(d) {
+    var el=document.getElementById("state");
+    el.textContent=STATES[d.state]||"Unknown"; el.className="value "+sc(d.state);
+    document.getElementById("time").textContent=fmtT(d.time_remaining);
+    document.getElementById("last").textContent=d.last_equalisation||"Never";
+    document.getElementById("next").textContent=d.days_until_next!=null?d.days_until_next+" days":"Due now";
+    document.getElementById("vtrojan").textContent=fmt(d.trojan_voltage,"V");
+    document.getElementById("vlfp").textContent=fmt(d.lfp_voltage,"V");
+    document.getElementById("delta").textContent=fmt(d.voltage_delta,"V");
+    if(d.settings){
+      si("s_eqv",d.settings.eq_voltage); si("s_eqi",d.settings.eq_current_complete);
+      si("s_timeout",d.settings.eq_timeout_hours); si("s_float",d.settings.float_voltage);
+      si("s_delta",d.settings.voltage_delta_max); si("s_days",d.settings.days_between);
+      si("s_start",d.settings.start_hour); si("s_end",d.settings.end_hour);
+      si("s_soc",d.settings.lfp_soc_min);
+      var sel=document.getElementById("s_enabled"); if(sel) sel.value=d.settings.enabled?"1":"0";
+    }
+    document.getElementById("updated").textContent="Updated "+new Date().toLocaleTimeString();
+    initialLoad=false;
+  }).catch(function(e){
+    document.getElementById("updated").textContent="Error: "+e;
+  });
+}
+
+function runNow() {
+  if(!confirm("Start FLA equalisation now?\\n(LFP SoC must be >= 95%)")) return;
+  fetch("/api/run-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("run_msg").textContent=d.message;
+    setTimeout(refresh,2000);
+  });
+}
+
+refresh();
+setInterval(refresh,5000);
+</script>
+</body>
+</html>"""
+
+
+def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
+                 voltage_delta=None, last_eq=None, days_until=None, settings=None):
+    """Update the shared cache from the GLib main loop thread."""
+    if state is not None:
+        _cache["state"] = state
+    if time_remaining is not None:
+        _cache["time_remaining"] = time_remaining
+    if trojan_v is not None:
+        _cache["trojan_voltage"] = trojan_v
+    if lfp_v is not None:
+        _cache["lfp_voltage"] = lfp_v
+    if voltage_delta is not None:
+        _cache["voltage_delta"] = voltage_delta
+    if last_eq is not None:
+        _cache["last_equalisation"] = last_eq
+    if days_until is not None:
+        _cache["days_until_next"] = days_until
+    if settings is not None:
+        _cache["settings"] = settings
+
+
+def check_run_now():
+    """Check and clear the run_now flag (called from GLib thread)."""
+    if _cache["run_now_requested"]:
+        _cache["run_now_requested"] = False
+        return True
+    return False
+
+
+class RequestHandler(BaseHTTPRequestHandler):
+    """HTTP request handler — reads from cache, no D-Bus calls."""
+
+    def log_message(self, format, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/" or self.path == "/index.html":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(HTML_PAGE.encode())
+        elif self.path == "/api/status":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps(_cache).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/api/run-now":
+            _cache["run_now_requested"] = True
+            msg = {"message": "RunNow requested — will start at next check (SoC must be >= 95%)"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(msg).encode())
+        elif self.path == "/api/setting":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body)
+                # Store in cache — the GLib thread will pick it up and write to D-Bus
+                key = data["key"]
+                value = data["value"]
+                _cache.setdefault("pending_settings", {})[key] = value
+                # Also update cache immediately so UI sees the change
+                if "settings" in _cache and isinstance(_cache["settings"], dict):
+                    _cache["settings"][key] = value
+                msg = {"ok": True, "key": key, "value": value}
+            except Exception as e:
+                msg = {"ok": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(msg).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def start_web_server():
+    """Start the web server in a background thread."""
+    server = HTTPServer(("0.0.0.0", PORT), RequestHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log.info("Web UI started at http://0.0.0.0:%d", PORT)
+    return server
