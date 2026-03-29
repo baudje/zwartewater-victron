@@ -86,6 +86,10 @@ class StatusService:
             "/VoltageDelta", None, writeable=True,
             gettextcallback=lambda a, x: "{:.2f}V".format(x) if x is not None else "---",
         )
+        self._service.add_path(
+            "/Alarms/Equalisation", 0, writeable=True,
+            gettextcallback=lambda a, x: {0: "OK", 1: "Warning", 2: "Alarm"}.get(x, "Unknown"),
+        )
 
         self._service.register()
         self._registered = True
@@ -107,12 +111,24 @@ class StatusService:
             if trojan_v is not None and lfp_v is not None:
                 svc["/VoltageDelta"] = round(abs(trojan_v - lfp_v), 2)
 
+    def set_alarm(self, level=2):
+        """Set alarm level: 0=OK, 1=Warning, 2=Alarm."""
+        if not self._registered:
+            return
+        self._service["/Alarms/Equalisation"] = level
+
+    def clear_alarm_path(self):
+        """Clear alarm on D-Bus."""
+        if not self._registered:
+            return
+        self._service["/Alarms/Equalisation"] = 0
+
     def deregister(self):
         """Remove the status service from D-Bus."""
         if not self._registered:
             return
         try:
-            self._service.__del__()
+            self._service["/Connected"] = 0
         except Exception as e:
             log.warning("Error deregistering status service: %s", e)
         self._registered = False

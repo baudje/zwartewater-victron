@@ -39,12 +39,16 @@ def deactivate_buzzer():
         pass
 
 
-def raise_alarm(message):
-    """Raise alarm: buzzer + log. VRM picks up D-Bus alarms automatically."""
+def raise_alarm(message, status_service=None):
+    """Raise alarm: buzzer + D-Bus alarm path + log."""
     log.error("ALARM: %s", message)
     activate_buzzer()
+    if status_service is not None:
+        status_service.set_alarm(2)
 
 
-def clear_alarm():
+def clear_alarm(status_service=None):
     """Clear alarm state."""
     deactivate_buzzer()
+    if status_service is not None:
+        status_service.clear_alarm_path()
