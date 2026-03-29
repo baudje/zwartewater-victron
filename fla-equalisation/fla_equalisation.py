@@ -8,19 +8,19 @@ Checks conditions every 60 seconds, visible on Cerbo GUI Device List.
 
 import logging
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
-# Add velib_python to path
+# Add shared modules and velib_python to path
+sys.path.insert(0, "/data/apps/fla-shared")
 sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"))
 
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-from dbus_battery_service import TempBatteryService
+from temp_battery import TempBatteryService
 from dbus_monitor import DbusMonitor
 from dbus_status_service import (
     StatusService, STATE_IDLE, STATE_STOPPING_DRIVER, STATE_DISCONNECTING,
@@ -28,7 +28,12 @@ from dbus_status_service import (
     STATE_RECONNECTING, STATE_RESTARTING_DRIVER, STATE_ERROR,
 )
 from settings import Settings
+import alerting
 from alerting import raise_alarm, clear_alarm
+from relay_control import open_relay, verify_relay_open, close_relay_verified, close_relay_delta_aware, startup_safety_check
+from voltage_matching import wait_for_match
+from aggregate_driver import stop as stop_aggregate_driver, start as start_aggregate_driver
+from lock import acquire as acquire_lock, release as release_lock
 from web_server import start_web_server, update_cache, check_run_now, _cache
 
 # Logging setup
@@ -44,7 +49,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 LAST_EQ_FILE = "/data/apps/fla-equalisation/last_equalisation"
-AGG_SERVICE_PATH = "/service/dbus-aggregate-batteries"
 CHECK_INTERVAL_SEC = 60  # Check conditions every 60 seconds
 
 
@@ -59,29 +63,6 @@ def read_last_equalisation():
 def write_last_equalisation():
     """Record current time as last successful equalisation."""
     Path(LAST_EQ_FILE).write_text(datetime.now().isoformat())
-
-
-def stop_aggregate_driver():
-    """Stop dbus-aggregate-batteries service."""
-    log.info("Stopping dbus-aggregate-batteries...")
-    result = subprocess.run(["svc", "-d", AGG_SERVICE_PATH], capture_output=True)
-    if result.returncode != 0:
-        log.error("Failed to stop aggregate driver: %s", result.stderr.decode())
-        return False
-    time.sleep(5)
-    log.info("Aggregate driver stopped")
-    return True
-
-
-def start_aggregate_driver():
-    """Start dbus-aggregate-batteries service."""
-    log.info("Starting dbus-aggregate-batteries...")
-    result = subprocess.run(["svc", "-u", AGG_SERVICE_PATH], capture_output=True)
-    if result.returncode != 0:
-        log.error("Failed to start aggregate driver: %s", result.stderr.decode())
-        return False
-    log.info("Aggregate driver started")
-    return True
 
 
 def days_until_next(settings):
@@ -129,6 +110,10 @@ def should_run(settings, monitor):
 
 def run_equalisation(settings, monitor, status):
     """Execute the full equalisation sequence. Returns True on success."""
+    if not acquire_lock("fla-equalisation"):
+        log.warning("Operation lock held — skipping equalisation")
+        return False
+
     temp_service = None
     aggregate_stopped = False
 
@@ -153,21 +138,13 @@ def run_equalisation(settings, monitor, status):
 
         # Step 3: Open relay 2 (disconnect LFP direct path)
         status.update(state=STATE_DISCONNECTING)
-        if not monitor.set_relay(0):
+        if not open_relay(monitor):
             status.update(state=STATE_ERROR)
             raise_alarm("Failed to open relay 2", status_service=status)
             return False
-        log.info("Relay 2 opened — LFP direct path disconnected, Orion activating")
-
-        # Step 4: Verify LFP disconnected
-        time.sleep(10)
-        lfp_current = monitor.get_lfp_current()
-        if lfp_current is not None and abs(lfp_current) > 5.0:
+        if not verify_relay_open(monitor):
             status.update(state=STATE_ERROR)
-            raise_alarm(
-                "LFP current still %.1fA after relay open — relay may not have opened" % abs(lfp_current),
-                status_service=status,
-            )
+            raise_alarm("LFP not disconnected after relay open", status_service=status)
             return False
 
         # Record LFP voltage at disconnect for Orion failure detection (CRIT-3)
@@ -242,71 +219,23 @@ def run_equalisation(settings, monitor, status):
 
             time.sleep(30)
 
-        # Step 6: Reduce CVL to float
+        # Step 6: Reduce CVL to float + voltage matching
         status.update(state=STATE_COOLING_DOWN)
-        log.info("Reducing CVL to float voltage %.1fV", settings.float_voltage)
-        temp_service.set_charge_voltage(settings.float_voltage)
-
-        # Step 7: Voltage matching
         status.update(state=STATE_VOLTAGE_MATCHING)
-        log.info("Waiting for voltage convergence (delta < %.1fV)", settings.voltage_delta_max)
-        match_start = time.time()
-        match_timeout = settings.voltage_match_timeout_hours * 3600
-
-        while True:
-            elapsed = time.time() - match_start
-
-            v_trojan = monitor.get_trojan_voltage()
-            v_lfp = monitor.get_lfp_voltage()
-
-            if v_trojan is None:
-                status.update(state=STATE_ERROR)
-                raise_alarm("SmartShunt Trojan (279) unresponsive during voltage matching",
-                    status_service=status)
-                return False
-
-            if v_trojan is not None and v_lfp is not None:
-                delta = abs(v_trojan - v_lfp)
-                remaining = max(0, match_timeout - elapsed)
-                status.update(time_remaining=remaining, trojan_v=v_trojan, lfp_v=v_lfp)
-                temp_service.update_voltage_current(v_trojan, monitor.get_trojan_current())
-
-                if delta < settings.voltage_delta_max:
-                    log.info("Voltage converged: Trojan=%.2fV, LFP=%.2fV, delta=%.2fV",
-                        v_trojan, v_lfp, delta)
-                    break
-
-                if int(elapsed) % 300 < 30:
-                    log.info("Voltage matching: Trojan=%.2fV, LFP=%.2fV, delta=%.2fV (%.0f min)",
-                        v_trojan, v_lfp, delta, elapsed / 60)
-
-            if elapsed > match_timeout:
-                status.update(state=STATE_ERROR)
-                raise_alarm(
-                    "Voltage delta did not converge after %.0f hours. "
-                    "Trojan=%.2fV, LFP=%.2fV, delta=%.2fV. "
-                    "LFPs remain disconnected — manual intervention required."
-                    % (elapsed / 3600, v_trojan or 0, v_lfp or 0,
-                       delta if (v_trojan and v_lfp) else 0),
-                    status_service=status)
-                return False
-
-            time.sleep(30)
+        matched, delta = wait_for_match(
+            monitor, temp_service, status, alerting,
+            voltage_delta_max=settings.voltage_delta_max,
+            timeout_hours=settings.voltage_match_timeout_hours,
+            float_voltage=settings.float_voltage,
+        )
+        if not matched:
+            return False
 
         # Step 8: Close relay 2
         status.update(state=STATE_RECONNECTING)
-        delta = abs(v_trojan - v_lfp) if (v_trojan is not None and v_lfp is not None) else 0
-        if not monitor.set_relay(1):
+        if not close_relay_verified(monitor):
             raise_alarm("Failed to close relay 2", status_service=status)
             return False
-
-        # CRIT-1: Verify relay actually closed after reconnect
-        time.sleep(2)
-        if monitor.get_relay_state() != 1:
-            status.update(state=STATE_ERROR)
-            raise_alarm("Relay 2 failed to close — LFP remains disconnected", status_service=status)
-            return False
-        log.info("Relay 2 closed — LFP direct path restored")
 
         # New feature: Register inrush current on reconnect
         time.sleep(1)
@@ -353,31 +282,15 @@ def run_equalisation(settings, monitor, status):
                 pass
 
         # CRIT-2: Check voltage delta before closing relay
-        relay_state = monitor.get_relay_state()
-        if relay_state == 0:
-            v_t = monitor.get_trojan_voltage()
-            v_l = monitor.get_lfp_voltage()
-            if v_t is not None and v_l is not None and abs(v_t - v_l) > 2.0:
-                log.error(
-                    "SAFETY: Relay open with delta=%.1fV — too large to auto-close. "
-                    "LFPs remain on Orion. Manual intervention required.", abs(v_t - v_l)
-                )
-                raise_alarm(
-                    "Relay open with %.1fV delta — manual close required" % abs(v_t - v_l),
-                    status_service=status,
-                )
-                # Do NOT close relay — leave LFPs safely on Orion
-            else:
-                log.warning("Safety: closing relay (delta=%.1fV)",
-                            abs(v_t - v_l) if (v_t and v_l) else 0)
-                monitor.set_relay(1)
-                time.sleep(2)
+        close_relay_delta_aware(monitor, alerting, status)
 
         if aggregate_stopped:
             try:
                 start_aggregate_driver()
             except Exception:
                 log.error("CRITICAL: Failed to restart aggregate driver in cleanup")
+
+        release_lock()
 
 
 class FlaEqualisationService:
@@ -395,31 +308,7 @@ class FlaEqualisationService:
 
     def _startup_safety_check(self):
         """Check relay state on startup — recover from interrupted equalisation."""
-        relay_state = self.monitor.get_relay_state()
-        if relay_state == 0:
-            log.warning("STARTUP: Relay 2 is open — possible interrupted equalisation")
-            v_t = self.monitor.get_trojan_voltage()
-            v_l = self.monitor.get_lfp_voltage()
-            if v_t is not None and v_l is not None:
-                delta = abs(v_t - v_l)
-                if delta < 2.0:
-                    log.info("STARTUP: Delta=%.1fV safe — closing relay", delta)
-                    self.monitor.set_relay(1)
-                    time.sleep(3)
-                else:
-                    log.error("STARTUP: Delta=%.1fV too high — leaving relay open, alarm raised", delta)
-                    self.status.update(state=STATE_ERROR)
-                    raise_alarm(
-                        "Startup: relay open with %.1fV delta — manual close required" % delta,
-                        status_service=self.status,
-                    )
-            else:
-                log.error("STARTUP: Cannot read voltages — leaving relay open for safety")
-                self.status.update(state=STATE_ERROR)
-                raise_alarm(
-                    "Startup: relay open, cannot read voltages — manual check required",
-                    status_service=self.status,
-                )
+        startup_safety_check(self.monitor, self.status, alerting)
 
     def _update_idle_status(self):
         """Update status display and web cache with idle info."""

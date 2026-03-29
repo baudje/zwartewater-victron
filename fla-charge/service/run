@@ -1,0 +1,3 @@
+#!/bin/sh
+exec 2>&1
+exec python3 /data/apps/fla-charge/fla_charge.py
