@@ -52,6 +52,14 @@ rm -f /etc/cron.d/fla-equalisation
 ln -sfn "${SERVICE_DIR}" /service/fla-equalisation
 echo "Service symlink created at /service/fla-equalisation"
 
+# Add to rc.local for persistence across Venus OS firmware upgrades
+if ! grep -q "fla-equalisation" /data/rc.local 2>/dev/null; then
+    echo "" >> /data/rc.local
+    echo "# FLA Equalisation service" >> /data/rc.local
+    echo "ln -sfn /data/apps/fla-equalisation/service /service/fla-equalisation" >> /data/rc.local
+    echo "Added to /data/rc.local for auto-start on firmware upgrade"
+fi
+
 # Service starts automatically via daemontools
 sleep 3
 echo ""
