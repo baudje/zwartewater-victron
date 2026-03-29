@@ -116,15 +116,15 @@ def run_equalisation(settings, monitor, status):
 
     temp_service = None
     aggregate_stopped = False
+    original_dvcc_voltage = None
 
     try:
         # Step 1: Register temporary battery service at SAFE voltage first
         # (not equalisation voltage — protect LFPs if crash before relay opens)
-        # Instance 100 coexists with aggregate instance 99 until it disappears
         temp_service = TempBatteryService(device_instance=100)
         temp_service.register(
             charge_voltage=28.4,  # Safe LFP voltage — raised to EQ after relay opens
-            charge_current=120.0,
+            charge_current=60.0,  # FLA recommended max bulk current
             discharge_current=0,
         )
 
@@ -152,7 +152,10 @@ def run_equalisation(settings, monitor, status):
         if lfp_voltage_at_disconnect is not None:
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
 
-        # Step 5: NOW safe to raise CVL to equalisation voltage — LFPs are disconnected
+        # Step 5: Raise DVCC system limit and CVL — LFPs are disconnected, safe
+        original_dvcc_voltage = monitor.get_dvcc_max_charge_voltage()
+        log.info("Saving DVCC MaxChargeVoltage: %.1fV", original_dvcc_voltage or 0)
+        monitor.set_dvcc_max_charge_voltage(settings.eq_voltage + 0.5)  # Headroom above target
         temp_service.set_charge_voltage(settings.eq_voltage)
         log.info("CVL raised to equalisation voltage: %.1fV", settings.eq_voltage)
 
@@ -277,6 +280,14 @@ def run_equalisation(settings, monitor, status):
         return False
 
     finally:
+        # Restore DVCC MaxChargeVoltage before anything else
+        if original_dvcc_voltage is not None:
+            try:
+                monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
+                log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
+            except Exception:
+                log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
+
         if temp_service is not None:
             try:
                 temp_service.deregister()

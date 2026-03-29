@@ -138,6 +138,7 @@ def run_charge(settings, monitor, status):
     """Execute the full FLA charge sequence. Returns True on success."""
     temp_service = None
     aggregate_stopped = False
+    original_dvcc_voltage = None
 
     if not acquire_lock("fla-charge"):
         log.info("Operation lock held — skipping")
@@ -207,7 +208,7 @@ def run_charge(settings, monitor, status):
         temp_service = TempBatteryService(device_instance=100)
         temp_service.register(
             charge_voltage=current_voltage,
-            charge_current=120.0,
+            charge_current=60.0,  # FLA recommended max bulk current
             discharge_current=0,
         )
 
@@ -233,7 +234,10 @@ def run_charge(settings, monitor, status):
         if lfp_voltage_at_disconnect:
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
 
-        # NOW safe to raise CVL
+        # Raise DVCC system limit and CVL — LFPs are disconnected, safe
+        original_dvcc_voltage = monitor.get_dvcc_max_charge_voltage()
+        log.info("Saving DVCC MaxChargeVoltage: %.1fV", original_dvcc_voltage or 0)
+        monitor.set_dvcc_max_charge_voltage(settings.fla_bulk_voltage + 0.5)
         temp_service.set_charge_voltage(settings.fla_bulk_voltage)
         log.info("CVL raised to FLA bulk voltage: %.2fV", settings.fla_bulk_voltage)
 
@@ -357,6 +361,14 @@ def run_charge(settings, monitor, status):
         return False
 
     finally:
+        # Restore DVCC MaxChargeVoltage before anything else
+        if original_dvcc_voltage is not None:
+            try:
+                monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
+                log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
+            except Exception:
+                log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
+
         if temp_service is not None:
             try: temp_service.deregister()
             except: pass

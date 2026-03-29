@@ -159,6 +159,28 @@ class DbusMonitor:
         """Read Cerbo relay 2 state. Returns 0 (open) or 1 (closed), or None."""
         return _get_dbus_value(self.bus, SYSTEM_SERVICE, RELAY_STATE_PATH)
 
+    def get_dvcc_max_charge_voltage(self):
+        """Read the DVCC system MaxChargeVoltage setting."""
+        return _get_dbus_value(
+            self.bus, "com.victronenergy.settings",
+            "/Settings/SystemSetup/MaxChargeVoltage",
+        )
+
+    def set_dvcc_max_charge_voltage(self, voltage):
+        """Set the DVCC system MaxChargeVoltage setting. Returns True on success."""
+        try:
+            obj = self.bus.get_object(
+                "com.victronenergy.settings",
+                "/Settings/SystemSetup/MaxChargeVoltage",
+            )
+            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+            iface.SetValue(dbus.Double(voltage))
+            log.info("DVCC MaxChargeVoltage set to %.1fV", voltage)
+            return True
+        except dbus.exceptions.DBusException as e:
+            log.error("Failed to set DVCC MaxChargeVoltage: %s", e)
+            return False
+
     def invalidate_services(self):
         """Force re-discovery of SmartShunt services."""
         self._lfp_service = None
