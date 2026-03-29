@@ -41,9 +41,10 @@ STATE_NAMES = {
 
 
 def get_bus():
+    """Private bus for status service — avoids root path conflict with temp battery service."""
     if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
-        return dbus.SessionBus()
-    return dbus.SystemBus()
+        return dbus.SessionBus(private=True)
+    return dbus.SystemBus(private=True)
 
 
 class StatusService:
