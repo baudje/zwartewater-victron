@@ -9,8 +9,6 @@ avoiding cross-thread D-Bus calls.
 
 import json
 import logging
-import os
-import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
@@ -204,27 +202,19 @@ setInterval(refresh,5000);
 def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
                  voltage_delta=None, trojan_soc=None, lfp_soc=None,
                  trojan_current=None, last_charge=None, settings=None):
-    """Update the shared cache from the GLib main loop thread."""
-    if state is not None:
-        _cache["state"] = state
-    if time_remaining is not None:
-        _cache["time_remaining"] = time_remaining
-    if trojan_v is not None:
-        _cache["trojan_voltage"] = trojan_v
-    if lfp_v is not None:
-        _cache["lfp_voltage"] = lfp_v
-    if voltage_delta is not None:
-        _cache["voltage_delta"] = voltage_delta
-    if trojan_soc is not None:
-        _cache["trojan_soc"] = trojan_soc
-    if lfp_soc is not None:
-        _cache["lfp_soc"] = lfp_soc
-    if trojan_current is not None:
-        _cache["trojan_current"] = trojan_current
-    if last_charge is not None:
-        _cache["last_charge"] = last_charge
-    if settings is not None:
-        _cache["settings"] = settings
+    """Update the shared cache atomically from the GLib main loop thread."""
+    updates = {}
+    if state is not None: updates["state"] = state
+    if time_remaining is not None: updates["time_remaining"] = time_remaining
+    if trojan_v is not None: updates["trojan_voltage"] = trojan_v
+    if lfp_v is not None: updates["lfp_voltage"] = lfp_v
+    if voltage_delta is not None: updates["voltage_delta"] = voltage_delta
+    if trojan_soc is not None: updates["trojan_soc"] = trojan_soc
+    if lfp_soc is not None: updates["lfp_soc"] = lfp_soc
+    if trojan_current is not None: updates["trojan_current"] = trojan_current
+    if last_charge is not None: updates["last_charge"] = last_charge
+    if settings is not None: updates["settings"] = settings
+    _cache.update(updates)
 
 
 def check_run_now():

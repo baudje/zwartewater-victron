@@ -10,6 +10,7 @@ import time
 log = logging.getLogger(__name__)
 
 RELAY_CLOSE_DELTA_MAX = 1.0  # Max voltage delta for auto-close (V)
+LFP_SAFE_CVL = 28.4          # Max CVL safe for LFPs (3.55V × 8 cells)
 
 
 def open_relay(monitor):
@@ -76,6 +77,29 @@ def close_relay_delta_aware(monitor, alerting_mod=None, status=None):
 
     monitor.set_relay(1)
     time.sleep(2)
+
+
+def verify_relay_still_open(monitor, current_cvl):
+    """Verify relay is still open during high-voltage charging.
+
+    Called every iteration in EQ/charge loops. If relay is found closed
+    while CVL > LFP safe voltage, LFPs are exposed to dangerous voltage.
+    Returns True if safe (relay open), False if unsafe (relay closed at high CVL).
+    """
+    relay_state = monitor.get_relay_state()
+    if relay_state == 0:
+        return True  # Relay open — safe
+
+    # Relay is closed but CVL is above LFP safe voltage — CRITICAL
+    if current_cvl > LFP_SAFE_CVL:
+        log.error(
+            "CRITICAL: Relay 2 closed externally while CVL=%.1fV! "
+            "LFPs exposed to dangerous voltage. Aborting immediately.", current_cvl
+        )
+        return False
+
+    # Relay closed but CVL is safe (e.g., during voltage matching at 27.0V)
+    return True
 
 
 def startup_safety_check(monitor, status=None, alerting_mod=None):

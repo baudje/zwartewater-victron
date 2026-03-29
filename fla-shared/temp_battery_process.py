@@ -27,18 +27,18 @@ log = logging.getLogger(__name__)
 
 def _find_service_by_instance(bus, instance):
     """Find a SmartShunt D-Bus service by device instance number."""
-    for prefix in ("com.victronenergy.battery", "com.victronenergy.dcload"):
-        for name in bus.list_names():
-            name = str(name)
-            if not name.startswith(prefix):
-                continue
-            try:
-                obj = bus.get_object(name, "/DeviceInstance")
-                iface = dbus.Interface(obj, "com.victronenergy.BusItem")
-                if int(iface.GetValue()) == instance:
-                    return name
-            except Exception:
-                continue
+    prefixes = ("com.victronenergy.battery", "com.victronenergy.dcload")
+    for name in bus.list_names():
+        name = str(name)
+        if not any(name.startswith(p) for p in prefixes):
+            continue
+        try:
+            obj = bus.get_object(name, "/DeviceInstance")
+            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+            if int(iface.GetValue()) == instance:
+                return name
+        except Exception:
+            continue
     return None
 
 

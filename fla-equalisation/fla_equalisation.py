@@ -30,9 +30,10 @@ from dbus_status_service import (
 from settings import Settings
 import alerting
 from alerting import raise_alarm, clear_alarm
-from relay_control import open_relay, verify_relay_open, close_relay_verified, close_relay_delta_aware, startup_safety_check
+from relay_control import open_relay, verify_relay_open, verify_relay_still_open, close_relay_verified, close_relay_delta_aware, startup_safety_check
 from voltage_matching import wait_for_match
 from aggregate_driver import stop as stop_aggregate_driver, start as start_aggregate_driver
+from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock
 from web_server import start_web_server, update_cache, check_run_now, _cache
 
@@ -160,11 +161,15 @@ def run_equalisation(settings, monitor, status):
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
 
         # Step 5: Raise DVCC system limit and CVL — LFPs are disconnected, safe
+        battery_temp = monitor.get_battery_temperature()
+        eq_voltage = temp_compensate(settings.eq_voltage, battery_temp)
         original_dvcc_voltage = monitor.get_dvcc_max_charge_voltage()
         log.info("Saving DVCC MaxChargeVoltage: %.1fV", original_dvcc_voltage or 0)
-        monitor.set_dvcc_max_charge_voltage(settings.eq_voltage + 0.5)  # Headroom above target
-        temp_service.set_charge_voltage(settings.eq_voltage)
-        log.info("CVL raised to equalisation voltage: %.1fV", settings.eq_voltage)
+        monitor.set_dvcc_max_charge_voltage(eq_voltage + 0.5)  # Headroom above target
+        temp_service.set_charge_voltage(eq_voltage)
+        log.info("CVL raised to equalisation voltage: %.1fV (base %.1fV, temp %s)",
+                 eq_voltage, settings.eq_voltage,
+                 "%.1f°C" % battery_temp if battery_temp is not None else "N/A")
 
         # Step 6: Equalisation — monitor Trojan current
         status.update(state=STATE_EQUALISING)
@@ -195,6 +200,12 @@ def run_equalisation(settings, monitor, status):
                 raise_alarm("SmartShunt Trojan (279) unresponsive during equalisation", status_service=status)
                 return False
 
+            # Verify relay still open — external close at 31.5V would damage LFPs
+            if not verify_relay_still_open(monitor, settings.eq_voltage):
+                status.update(state=STATE_ERROR)
+                raise_alarm("Relay closed externally during EQ — aborting", status_service=status)
+                return False
+
             # CRIT-3: Detect Orion failure — LFP voltage dropping
             if (lfp_voltage_at_disconnect is not None and v_lfp is not None
                     and v_lfp < lfp_voltage_at_disconnect - 0.5):
@@ -217,11 +228,12 @@ def run_equalisation(settings, monitor, status):
                 log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", abs(i_trojan))
 
             # Only check current completion AFTER voltage reaches the target
-            voltage_reached = v_trojan is not None and v_trojan >= settings.eq_voltage
+            # Use compensated voltage minus 0.1V margin for wiring losses
+            voltage_reached = v_trojan is not None and v_trojan >= (eq_voltage - 0.1)
             if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.eq_current_complete:
                 log.info(
                     "Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA threshold (%.0f min)",
-                    v_trojan, settings.eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60,
+                    v_trojan, eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60,
                 )
                 break
 
@@ -237,8 +249,6 @@ def run_equalisation(settings, monitor, status):
             time.sleep(30)
 
         # Step 6: Reduce CVL to float + voltage matching
-        status.update(state=STATE_COOLING_DOWN)
-        update_cache(state=STATE_COOLING_DOWN)
         status.update(state=STATE_VOLTAGE_MATCHING)
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -248,7 +258,7 @@ def run_equalisation(settings, monitor, status):
             monitor, temp_service, status, alerting,
             voltage_delta_max=settings.voltage_delta_max,
             timeout_hours=settings.voltage_match_timeout_hours,
-            float_voltage=settings.float_voltage,
+            float_voltage=temp_compensate(settings.float_voltage, battery_temp),
             cache_callback=_vm_cache_cb,
         )
         if not matched:
@@ -387,29 +397,15 @@ class FlaEqualisationService:
         pending = _cache.pop("pending_settings", None)
         if not pending:
             return
-        key_to_method = {
-            "eq_voltage": "eq_voltage",
-            "eq_current_complete": "eq_current_complete",
-            "eq_timeout_hours": "eq_timeout_hours",
-            "float_voltage": "float_voltage",
-            "voltage_delta_max": "voltage_delta_max",
-            "days_between": "days_between",
-            "start_hour": "start_hour",
-            "end_hour": "end_hour",
-            "lfp_soc_min": "lfp_soc_min",
-            "enabled": "enabled",
-        }
         for key, value in pending.items():
-            if key in key_to_method:
-                # MIN-3: Bounds validation
-                if key in SETTINGS_DEFS:
-                    _, _, minimum, maximum = SETTINGS_DEFS[key]
-                    if value < minimum or value > maximum:
-                        log.warning("Setting %s value %s out of bounds [%s, %s] — rejected",
-                                    key, value, minimum, maximum)
-                        continue
-                self.settings._write(key_to_method[key], value)
-                log.info("Setting %s updated to %s via web UI", key, value)
+            if key in SETTINGS_DEFS:
+                _, _, minimum, maximum = SETTINGS_DEFS[key]
+                if value < minimum or value > maximum:
+                    log.warning("Setting %s value %s out of bounds [%s, %s] — rejected",
+                                key, value, minimum, maximum)
+                    continue
+            self.settings._write(key, value)
+            log.info("Setting %s updated to %s via web UI", key, value)
 
     def _check(self):
         """Periodic check — called by GLib timer. Returns True to keep running."""

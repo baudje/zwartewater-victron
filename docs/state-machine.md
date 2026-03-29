@@ -78,8 +78,8 @@ Disconnected: ActiveBattery = temp/100 at 28.4V, Relay2 = open, Orion active
     v (FLA equaliser raises CVL to 31.5V — ONLY after relay confirmed open)
 EQ mode:      ActiveBattery = temp/100 at 31.5V, Relay2 = open, Orion active
     |          *** If crash here: temp svc dies, Quattro stops charging, LFPs on Orion (safe) ***
-    v (equalisation complete, CVL reduced to 27.0V float)
-Cooling:      ActiveBattery = temp/100 at 27.0V, Relay2 = open
+    v (equalisation complete, CVL reduced to 27.0V float, voltage matching)
+Matching:     ActiveBattery = temp/100 at 27.0V, Relay2 = open
     |
     v (voltage delta < 1V, relay closes, verified via read-back)
 Reconnected:  ActiveBattery = temp/100 at 27.0V, Relay2 = closed, inrush measured
@@ -223,10 +223,8 @@ Persistent daemontools service that monitors conditions and orchestrates equalis
               |                                           |
               | (V >= 31.4V AND I < 10A, OR timeout/lost) |
               v                                           |
-  [4: Cooling down]                                       |
-              |  reduce CVL to 27.0V (float)              |
-              v                                           |
   [5: Voltage matching]                                   |
+              |  reduce CVL to 27.0V (float)              |
               |  wait for |V_trojan - V_lfp| < 1V         |
               |  check SmartShunt Trojan responsive        |
               |                                           |
@@ -294,6 +292,7 @@ Read relay 2 state
 | **Orion failure** | LFP V drops > 0.5V during EQ | Abort + reconnect |
 | **SmartShunt Trojan** | V_trojan = None | Abort in both EQ and voltage matching |
 | **Current loss** | i_trojan = None for 5 min | Proceed to voltage matching (not full timeout) |
+| **Relay re-verification** | Every 30s during high-voltage phases | If relay found closed while CVL > 28.4V: abort immediately |
 | **High current** | Trojan I > 60A during EQ | Warning (dynamo/MPPT detected) |
 | **Voltage match timeout** | > 4 hours | Alarm, stay disconnected, manual intervention |
 | **SoC enforcement** | RunNow with SoC < 95% | Refused — SoC never bypassed |
@@ -327,7 +326,7 @@ T+7   | Charging @ 28.4V | CVL from temp/100     | Stopped    | Running    | Ope
 T+17  | Charging @ 28.4V | CVL from temp/100     | Stopped    | Running    | Verify + raise CVL  | Open  | On    | 31.5V
 T+18  | Charging @ 31.5V | CVL from temp/100     | Stopped    | Running    | Equalising          | Open  | On    | 31.5V
 T+168 | Tapering @ 31.5V | CVL from temp/100     | Stopped    | Running    | EQ done (V≥31.4,I<10A)| Open  | On    | 31.5V
-T+169 | Charging @ 27.0V | CVL=27.0V (float)     | Stopped    | Running    | Cooling down        | Open  | On    | 27.0V
+T+169 | Charging @ 27.0V | CVL=27.0V (float)     | Stopped    | Running    | Voltage matching    | Open  | On    | 27.0V
 T+199 | Float @ 27.0V    | CVL=27.0V             | Stopped    | Running    | Voltage matching    | Open  | On    | 27.0V
 T+229 | Float @ 27.0V    | CVL=27.0V             | Stopped    | Running    | Delta < 1V          | Open  | On    | 27.0V
 T+230 | Float @ 27.0V    | CVL=27.0V             | Stopped    | Running    | Close + verify relay| Closed| Off   | 27.0V
@@ -346,7 +345,7 @@ T+244 | Charging @ 28.4V | CVL from agg/99       | Running    | Running    | Idl
 | T+2-T+7 (aggregate stopping) | 28.4V from temp/100 | Safe — 28.4V / 8 = 3.55V/cell | Startup check: relay closed, idle |
 | T+7-T+17 (relay open, CVL still 28.4V) | 28.4V from temp/100 | Safe — on Orion | Startup check: relay open, delta < 1V → auto-close |
 | T+17-T+168 (equalising at 31.5V) | **Temp dies → no CVL** | **Safe — on Orion** | Quattro stops charging. Startup: relay open, check delta |
-| T+169-T+229 (cooling/matching at 27.0V) | **Temp dies → no CVL** | Safe — on Orion | Startup: relay open, check delta |
+| T+169-T+229 (voltage matching at 27.0V) | **Temp dies → no CVL** | Safe — on Orion | Startup: relay open, check delta |
 | T+230 (relay just closed) | 27.0V from temp/100 | Safe — on bus at 27.0V | Normal restart |
 | T+234 (aggregate restarting) | No CVL briefly | Safe — relay closed, both banks on bus | Aggregate starts normally |
 
@@ -360,11 +359,11 @@ Time  | Event                        | Quattro     | Relay | FLA Eq action
 T+0   | SmartShunt Trojan offline    | @ 31.5V     | Open  | Detect error
 T+1   | —                            | @ 31.5V     | Open  | Deregister temp service
 T+2   | —                            | No CVL      | Open  | Finally: check delta
-T+3   | Delta < 2V                   | No CVL      | Open  | Auto-close relay
+T+3   | Delta < 1V                   | No CVL      | Open  | Auto-close relay
 T+5   | —                            | No CVL      | Closed| Restart aggregate driver
 T+15  | —                            | @ 28.4V     | Closed| Alarm: buzzer + VRM + D-Bus
       |                              |             |       |
-T+3   | Delta > 2V (alternative)     | No CVL      | Open  | DO NOT close relay
+T+3   | Delta > 1V (alternative)     | No CVL      | Open  | DO NOT close relay
 T+4   | —                            | No CVL      | Open  | Alarm: manual intervention
       | LFPs remain safely on Orion  |             |       | Restart aggregate driver
 ```
@@ -483,13 +482,21 @@ Priority (highest to lowest):
 4. DVCC MaxChargeVoltage (reads from active battery service)
 5. Quattro charges up to DVCC limit
 
-During FLA equalisation (31.5V, CCL 60A):
+Temperature compensation (Trojan L16H-AC datasheet):
+- ±0.005V/cell/°C from 25°C reference (±0.06V/°C for 12-cell 24V)
+- Temperature read from JK BMS (serialbattery) — same engine room as FLA
+- Applied to EQ, absorption, and float voltages before setting CVL
+- If temperature unavailable: base voltage used (no compensation)
+- Compensated voltage capped at 32.4V (datasheet max EQ = 2.70V/cell × 12)
+- Example at 5°C: EQ = 31.5 + 1.2 = 32.4V (capped), Abs = 29.64 + 1.2 = 30.84V
+
+During FLA equalisation (31.5V base, temp-compensated, CCL 60A):
 1. JK BMS — not relevant (LFPs disconnected, Orion charges safely)
 2. serialbattery — still running but DVCC ignores its CVL
 3. Temp battery service CVL + CCL:
    - Phase 1 (relay closed): 28.4V / 60A — safe for LFPs
    - Phase 2 (relay open, verified): 31.5V / 60A — for Trojans only
-   - Phase 3 (cooling): 27.0V / 60A — float, waiting for delta < 1V
+   - Phase 3 (matching): 27.0V / 60A — float, waiting for delta < 1V
 4. DVCC reads from temp service
 5. Quattro + MPPT charge per DVCC command, capped at 60A total
 
@@ -498,7 +505,7 @@ During FLA charge (29.64V absorption, CCL 60A):
 3. Temp battery service CVL + CCL:
    - Phase 1 (shared): aggregate controls, both banks on bus
    - Phase 2 (relay open, verified): 29.64V / 60A — Trojan absorption
-   - Phase 3 (cooling): 27.0V / 60A — float, waiting for delta < 1V
+   - Phase 3 (matching): 27.0V / 60A — float, waiting for delta < 1V
 4-5. Same as above
 ```
 

@@ -30,7 +30,7 @@ cp "${SCRIPT_DIR}/web_server.py" "${INSTALL_DIR}/"
 SHARED_DIR="/data/apps/fla-shared"
 mkdir -p "${SHARED_DIR}"
 if [ -d "${SCRIPT_DIR}/../fla-shared" ]; then
-    for f in __init__.py relay_control.py voltage_matching.py aggregate_driver.py lock.py dbus_monitor.py alerting.py temp_battery.py temp_battery_process.py; do
+    for f in __init__.py relay_control.py voltage_matching.py aggregate_driver.py lock.py dbus_monitor.py alerting.py temp_battery.py temp_battery_process.py temp_compensation.py; do
         cp "${SCRIPT_DIR}/../fla-shared/${f}" "${SHARED_DIR}/"
     done
     mkdir -p "${SHARED_DIR}/ext"
