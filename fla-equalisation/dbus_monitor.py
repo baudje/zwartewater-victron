@@ -124,6 +124,8 @@ class DbusMonitor:
             return float(soc)
         # Fallback: try finding any serialbattery service
         for name in self.bus.list_names():
+            if "fla_equalisation" in str(name):
+                continue
             if "com.victronenergy.battery" in str(name) and "aggregate" not in str(name):
                 product = _get_dbus_value(self.bus, name, "/ProductName")
                 if product and "SerialBattery" in str(product):
