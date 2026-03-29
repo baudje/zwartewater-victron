@@ -241,6 +241,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 key = data["key"]
                 value = data["value"]
                 _cache.setdefault("pending_settings", {})[key] = value
+                # Also update cache immediately so UI sees the change
+                if "settings" in _cache and isinstance(_cache["settings"], dict):
+                    _cache["settings"][key] = value
                 msg = {"ok": True, "key": key, "value": value}
             except Exception as e:
                 msg = {"ok": False, "error": str(e)}
