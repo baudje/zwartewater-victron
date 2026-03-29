@@ -12,7 +12,7 @@ Five software components interact to manage the 24V DC system on Zwartewater. Ea
               +------------+------------+
               |                         |
     [Aggregate Battery]         [FLA Equaliser]
-      (device inst. 99)          (temp service)
+      (device inst. 99)        (temp svc inst. 100)
               |                         |
        reads from                 reads from
               |                         |
@@ -43,7 +43,7 @@ The Quattro is fully controlled by DVCC/ESS — it has no independent charge pro
 
 **Who controls it:** DVCC reads CVL from the active battery service (`com.victronenergy.battery/99` = aggregate driver) and commands the Quattro. The Quattro never decides its own charge voltage.
 
-**During FLA equalisation:** DVCC reads CVL from the temporary battery service (`com.victronenergy.battery.fla_equalisation`, device instance 100) which commands 31.2V. The Quattro enters Bulk/Absorption at this higher voltage.
+**During FLA equalisation:** DVCC reads CVL from the temporary battery service (`com.victronenergy.battery.fla_equalisation`, device instance 100). The CVL starts at 28.4V (safe) and is only raised to 31.2V after the relay is confirmed open.
 
 ### 2. Cerbo GX / DVCC (com.victronenergy.system)
 
@@ -60,21 +60,30 @@ DVCC (Distributed Voltage and Current Control) is the central coordinator.
 - `1` = closed (normal) — LFP direct path active, Orion off
 - `0` = open (equalisation) — LFP direct path broken, Orion activates
 
-**State transitions:**
+**State transitions (crash-safe sequencing):**
 ```
-Normal:    ActiveBattery = aggregate/99, Relay2 = closed
+Normal:       ActiveBattery = aggregate/99, Relay2 = closed, CVL = 28.4V
+    |
+    v (FLA equaliser registers temp service at 28.4V — coexists with aggregate)
+Preparing:    ActiveBattery = aggregate/99 (still wins, lower instance), Relay2 = closed
     |
     v (FLA equaliser stops aggregate driver)
-Transition: ActiveBattery = gone (briefly), Relay2 = closed
+Transitioning: ActiveBattery = temp/100 at 28.4V (safe), Relay2 = closed
+    |          *** If crash here: 28.4V is safe for both banks ***
+    v (FLA equaliser opens relay 2, verifies open)
+Disconnected: ActiveBattery = temp/100 at 28.4V, Relay2 = open, Orion active
+    |          *** If crash here: LFPs on Orion (safe), Trojans at 28.4V (safe) ***
+    v (FLA equaliser raises CVL to 31.2V — ONLY after relay confirmed open)
+EQ mode:      ActiveBattery = temp/100 at 31.2V, Relay2 = open, Orion active
+    |          *** If crash here: temp svc dies, Quattro stops charging, LFPs on Orion (safe) ***
+    v (equalisation complete, CVL reduced to 27.6V float)
+Cooling:      ActiveBattery = temp/100 at 27.6V, Relay2 = open
     |
-    v (FLA equaliser registers temp service)
-EQ mode:   ActiveBattery = fla_equalisation/100, Relay2 = open
+    v (voltage delta < 1V, relay closes, verified via read-back)
+Reconnected:  ActiveBattery = temp/100 at 27.6V, Relay2 = closed, inrush measured
     |
-    v (equalisation complete, voltage matched)
-Transition: temp service deregistered, Relay2 = closed
-    |
-    v (aggregate driver restarted)
-Normal:    ActiveBattery = aggregate/99, Relay2 = closed
+    v (temp service deregistered, aggregate driver restarted)
+Normal:       ActiveBattery = aggregate/99, Relay2 = closed, CVL = 28.4V
 ```
 
 ### 3. dbus-serialbattery (2 instances)
@@ -182,68 +191,113 @@ DCL:   0%       5%     100%
 
 ### 5. FLA Equalisation Service
 
-Persistent service that monitors conditions and orchestrates equalisation.
+Persistent daemontools service that monitors conditions and orchestrates equalisation. Web UI at port 8088.
 
 **Main state machine:**
 
 ```
-                    +──────────────────────────────+
-                    |                              |
-                    v                              |
-             [0: Idle] ─── check every 60s ───────+
-                    |                              |
-                    | (conditions met OR RunNow)   |
-                    v                              |
-        [1: Stopping driver]                       |
-                    |                              |
-                    v                              |
-        [2: Disconnecting LFP]                     |
-                    |                              |
-                    v                              |
-        [3: Equalising FLA]                        |
-                    |                              |
-                    | (I < 8A OR 2.5hr timeout)    |
-                    v                              |
-        [4: Cooling down]                          |
-                    |                              |
-                    v                              |
-        [5: Voltage matching]                      |
-                    |                              |
-                    | (delta < 1V)                 |
-                    v                              |
-        [6: Reconnecting LFP]                      |
-                    |                              |
-                    v                              |
-        [7: Restarting driver]                      |
-                    |                              |
-                    +──────────────────────────────+
+              +───────────────────────────────────────────+
+              |                                           |
+              v                                           |
+     [0: Idle] ─── check every 60s, update web UI ───────+
+              |                                           |
+              | (conditions met OR RunNow + SoC >= 95%)   |
+              v                                           |
+  [1: Stopping driver]                                    |
+              |  register temp svc at 28.4V (safe)        |
+              |  stop aggregate driver                    |
+              v                                           |
+  [2: Disconnecting LFP]                                  |
+              |  open relay 2                             |
+              |  verify: LFP current < 5A                 |
+              |  record LFP voltage at disconnect         |
+              |  raise CVL to 31.2V (EQ voltage)          |
+              v                                           |
+  [3: Equalising FLA]                                     |
+              |  monitor SmartShunt Trojan current         |
+              |  detect Orion failure (LFP V drop > 0.5V) |
+              |  warn if Trojan I > 60A (dynamo/MPPT)     |
+              |  handle i_trojan=None (5 min timeout)     |
+              |                                           |
+              | (I < 8A OR 2.5hr timeout OR current lost) |
+              v                                           |
+  [4: Cooling down]                                       |
+              |  reduce CVL to 27.6V (float)              |
+              v                                           |
+  [5: Voltage matching]                                   |
+              |  wait for |V_trojan - V_lfp| < 1V         |
+              |  check SmartShunt Trojan responsive        |
+              |                                           |
+              | (delta < 1V)                              |
+              v                                           |
+  [6: Reconnecting LFP]                                   |
+              |  close relay 2                            |
+              |  verify: relay state read-back = closed    |
+              |  measure inrush current + reconnect delta  |
+              v                                           |
+  [7: Restarting driver]                                  |
+              |  deregister temp service                  |
+              |  restart aggregate driver                 |
+              |  invalidate service cache                 |
+              |  record timestamp                         |
+              |                                           |
+              +───────────────────────────────────────────+
 
-        Any state ──> [8: Error] (on failure)
-                         |
-                         | (safety cleanup: close relay, restart driver)
-                         v
-                      Manual intervention required
+     Any state ──> [8: Error]
+                      |
+                      v
+                   finally block:
+                     - deregister temp service
+                     - check relay state:
+                         if open AND delta > 2V: alarm, do NOT close (manual)
+                         if open AND delta <= 2V: auto-close
+                     - restart aggregate driver if stopped
+```
+
+**Startup safety check (CRIT-4):**
+```
+Service starts (boot / crash recovery / manual restart)
+    |
+    v
+Read relay 2 state
+    |
+    +── closed (1) ──> Normal idle (no action needed)
+    |
+    +── open (0) ──> Read voltage delta
+                       |
+                       +── delta < 2V ──> Auto-close relay, log recovery
+                       |
+                       +── delta >= 2V ──> Raise alarm, stay open (manual intervention)
+                       |
+                       +── voltages unreadable ──> Raise alarm, stay open (manual intervention)
 ```
 
 **Scheduling conditions (all must be true):**
 
 | Condition | Check | Override |
 |-----------|-------|---------|
-| Enabled | settings flag | - |
+| Enabled | settings flag | — |
 | Interval elapsed | >= 90 days since last | RunNow bypasses |
 | Afternoon window | 14:00-17:00 | RunNow bypasses |
-| LFP SoC >= 95% | from aggregate/serialbattery | Never bypassed |
+| LFP SoC >= 95% | from aggregate/serialbattery | **Never bypassed (even by RunNow)** |
 
 **Safety guards and recovery:**
 
 | Guard | Trigger | Action |
 |-------|---------|--------|
-| LFP current after relay open | abs(I) > 5A | Abort → close relay → restart driver → alarm |
-| SmartShunt Trojan offline | V_trojan = None | Abort → close relay → restart driver → alarm |
-| Equalisation timeout | > 2.5 hours | Proceed to voltage matching (not abort) |
-| Voltage match timeout | > 4 hours | Alarm, stay disconnected, manual intervention |
-| Script crash | exception | Finally block: close relay, restart driver |
-| Aggregate driver won't restart | svc -u fails | Alarm |
+| **Crash-safe CVL** | Service crash before relay opens | Temp service at 28.4V (safe for LFPs), not 31.2V |
+| **Delta-aware finally** | Any abort with relay open | Only closes if delta < 2V; otherwise alarm + manual |
+| **Startup recovery** | Service start with open relay | Checks delta, auto-closes or alarms |
+| **Relay verification** | After relay open AND close | Reads back hardware state, aborts if mismatch |
+| **Orion failure** | LFP V drops > 0.5V during EQ | Abort + reconnect |
+| **SmartShunt Trojan** | V_trojan = None | Abort in both EQ and voltage matching |
+| **Current loss** | i_trojan = None for 5 min | Proceed to voltage matching (not full timeout) |
+| **High current** | Trojan I > 60A during EQ | Warning (dynamo/MPPT detected) |
+| **Voltage match timeout** | > 4 hours | Alarm, stay disconnected, manual intervention |
+| **SoC enforcement** | RunNow with SoC < 95% | Refused — SoC never bypassed |
+| **Inrush monitoring** | After relay reconnect | Measures and logs current + delta for calibration |
+| **Bounds validation** | Web UI setting change | Checked against min/max before D-Bus write |
+| **Double trigger** | RunNow race condition | Flag cleared when equalisation starts |
 
 ## Integrated State Transitions
 
@@ -254,30 +308,47 @@ Quattro:     Bulk/Absorption/Float/Inverting (ESS managed)
 DVCC:        reads CVL from aggregate (28.4V or 28.8V)
 Aggregate:   Running, publishing CVL/CCL/DCL
 SerialBatt:  Running, monitoring BMS, CVCM active
-FLA Eq:      Idle, checking every 60s, updating web UI
+FLA Eq:      Idle, checking every 60s, updating web UI with live voltages
 Relay 2:     Closed
 Orion:       Off
 ```
 
-### FLA Equalisation Sequence
+### FLA Equalisation Sequence (crash-safe)
 
 ```
-Time  | Quattro          | DVCC              | Aggregate  | SerialBatt | FLA Eq              | Relay | Orion
-------|------------------|-------------------|------------|------------|---------------------|-------|------
-T+0   | Charging @ 28.4V | CVL from agg/99   | Running    | Running    | Conditions met      | Closed| Off
-T+1   | Charging @ 28.4V | CVL from agg/99   | Stopping   | Running    | Stopping driver     | Closed| Off
-T+6   | No battery svc   | No CVL (brief)    | Stopped    | Running    | Registering temp    | Closed| Off
-T+7   | Charging @ 31.2V | CVL from temp/100 | Stopped    | Running    | Disconnecting       | Open  | On
-T+17  | Charging @ 31.2V | CVL from temp/100 | Stopped    | Running    | Equalising          | Open  | On
-T+167 | Tapering @ 31.2V | CVL from temp/100 | Stopped    | Running    | EQ complete (I<8A)  | Open  | On
-T+168 | Charging @ 27.6V | CVL=27.6V (float) | Stopped    | Running    | Cooling down        | Open  | On
-T+198 | Float @ 27.6V    | CVL=27.6V         | Stopped    | Running    | Voltage matching    | Open  | On
-T+228 | Float @ 27.6V    | CVL=27.6V         | Stopped    | Running    | Delta < 1V, closing | Close | Off
-T+233 | Float @ 27.6V    | No CVL (brief)    | Starting   | Running    | Restarting driver   | Closed| Off
-T+243 | Charging @ 28.4V | CVL from agg/99   | Running    | Running    | Idle                | Closed| Off
+Time  | Quattro          | DVCC                 | Aggregate  | SerialBatt | FLA Eq              | Relay | Orion | CVL
+------|------------------|----------------------|------------|------------|---------------------|-------|-------|------
+T+0   | Charging @ 28.4V | CVL from agg/99      | Running    | Running    | Conditions met      | Closed| Off   | 28.4V
+T+1   | Charging @ 28.4V | CVL from agg/99*     | Running    | Running    | Register temp @28.4V| Closed| Off   | 28.4V
+T+2   | Charging @ 28.4V | CVL from temp/100     | Stopping   | Running    | Stop aggregate      | Closed| Off   | 28.4V
+T+7   | Charging @ 28.4V | CVL from temp/100     | Stopped    | Running    | Open relay          | Open  | On    | 28.4V
+T+17  | Charging @ 28.4V | CVL from temp/100     | Stopped    | Running    | Verify + raise CVL  | Open  | On    | 31.2V
+T+18  | Charging @ 31.2V | CVL from temp/100     | Stopped    | Running    | Equalising          | Open  | On    | 31.2V
+T+168 | Tapering @ 31.2V | CVL from temp/100     | Stopped    | Running    | EQ done (I<8A)      | Open  | On    | 31.2V
+T+169 | Charging @ 27.6V | CVL=27.6V (float)     | Stopped    | Running    | Cooling down        | Open  | On    | 27.6V
+T+199 | Float @ 27.6V    | CVL=27.6V             | Stopped    | Running    | Voltage matching    | Open  | On    | 27.6V
+T+229 | Float @ 27.6V    | CVL=27.6V             | Stopped    | Running    | Delta < 1V          | Open  | On    | 27.6V
+T+230 | Float @ 27.6V    | CVL=27.6V             | Stopped    | Running    | Close + verify relay| Closed| Off   | 27.6V
+T+231 | Float @ 27.6V    | CVL=27.6V             | Stopped    | Running    | Measure inrush      | Closed| Off   | 27.6V
+T+234 | Float @ 27.6V    | No CVL (brief)        | Starting   | Running    | Restart driver      | Closed| Off   | —
+T+244 | Charging @ 28.4V | CVL from agg/99       | Running    | Running    | Idle                | Closed| Off   | 28.4V
 ```
 
-*(Times in minutes, approximate)*
+*(Times in minutes, approximate. *DVCC uses lowest device instance — agg/99 wins over temp/100 while both exist)*
+
+### Crash at Each Step
+
+| Crash point | CVL on bus | LFP exposure | Recovery |
+|---|---|---|---|
+| T+1 (temp registered, aggregate still running) | 28.4V from agg/99 | Safe — on bus at 28.4V | Temp dies, aggregate unaffected |
+| T+2-T+7 (aggregate stopping) | 28.4V from temp/100 | Safe — 28.4V / 8 = 3.55V/cell | Startup check: relay closed, idle |
+| T+7-T+17 (relay open, CVL still 28.4V) | 28.4V from temp/100 | Safe — on Orion | Startup check: relay open, delta < 2V → auto-close |
+| T+17-T+168 (equalising at 31.2V) | **Temp dies → no CVL** | **Safe — on Orion** | Quattro stops charging. Startup: relay open, check delta |
+| T+169-T+229 (cooling/matching at 27.6V) | **Temp dies → no CVL** | Safe — on Orion | Startup: relay open, check delta |
+| T+230 (relay just closed) | 27.6V from temp/100 | Safe — on bus at 27.6V | Normal restart |
+| T+234 (aggregate restarting) | No CVL briefly | Safe — relay closed, both banks on bus | Aggregate starts normally |
+
+**Key safety invariant**: CVL is never raised above 28.4V while the relay is closed. The 31.2V equalisation voltage is only applied after relay open is verified.
 
 ### Error Recovery
 
@@ -286,10 +357,32 @@ Time  | Event                        | Quattro     | Relay | FLA Eq action
 ------|------------------------------|-------------|-------|----------------------------
 T+0   | SmartShunt Trojan offline    | @ 31.2V     | Open  | Detect error
 T+1   | —                            | @ 31.2V     | Open  | Deregister temp service
-T+2   | —                            | No CVL      | Open  | Close relay 2
-T+4   | —                            | No CVL      | Closed| Restart aggregate driver
-T+14  | —                            | @ 28.4V     | Closed| Alarm: buzzer + VRM + D-Bus
-T+15  | —                            | Normal      | Closed| State = Error (manual check)
+T+2   | —                            | No CVL      | Open  | Finally: check delta
+T+3   | Delta < 2V                   | No CVL      | Open  | Auto-close relay
+T+5   | —                            | No CVL      | Closed| Restart aggregate driver
+T+15  | —                            | @ 28.4V     | Closed| Alarm: buzzer + VRM + D-Bus
+      |                              |             |       |
+T+3   | Delta > 2V (alternative)     | No CVL      | Open  | DO NOT close relay
+T+4   | —                            | No CVL      | Open  | Alarm: manual intervention
+      | LFPs remain safely on Orion  |             |       | Restart aggregate driver
+```
+
+### Startup After Cerbo Reboot During Equalisation
+
+```
+1. Cerbo reboots (shore power loss, firmware update, watchdog)
+2. /data/rc.local recreates /service/fla-equalisation symlink
+3. Daemontools starts fla_equalisation.py
+4. _startup_safety_check() runs:
+   a. Read relay 2 state
+   b. If closed (1): normal — relay was restored by hardware default or closed before reboot
+   c. If open (0): interrupted equalisation
+      - Read V_trojan and V_lfp
+      - If delta < 2V: auto-close relay, log recovery, proceed to idle
+      - If delta >= 2V: ALARM — do not close, manual intervention
+      - If voltages unreadable: ALARM — do not close, manual intervention
+5. Aggregate driver also restarts via rc.local (independent)
+6. System returns to normal operation (or error state for manual check)
 ```
 
 ## D-Bus Service Map
@@ -322,7 +415,31 @@ Priority (highest to lowest):
 During FLA equalisation:
 1. JK BMS — not relevant (LFPs disconnected, Orion charges safely)
 2. serialbattery — still running but DVCC ignores its CVL
-3. Temp battery service CVL (31.2V for Trojans)
+3. Temp battery service CVL:
+   - Phase 1 (relay closed): 28.4V — safe for LFPs
+   - Phase 2 (relay open, verified): 31.2V — for Trojans only
+   - Phase 3 (cooling): 27.6V — float
 4. DVCC reads from temp service
-5. Quattro charges Trojans at 31.2V
+5. Quattro charges per DVCC command
 ```
+
+## Inrush Current Monitoring
+
+After each successful reconnection, the service measures and logs:
+- **Inrush current** (from SmartShunt LFP, 1 second after relay close)
+- **Reconnect delta** (voltage difference at moment of closure)
+
+These values are displayed on the web UI and stored on D-Bus (`/InrushCurrent`, `/ReconnectDelta`).
+Use these measurements to calibrate the `voltage_delta_max` setting:
+- If inrush current is consistently low (< 50A), the delta threshold can be increased for faster reconnection
+- If inrush current is high (> 100A), reduce the delta threshold to protect relay contacts and SmartShunt wiring
+
+## Web UI
+
+Dashboard at **http://venus.local:8088** provides:
+- **Live status**: state, time remaining, last/next equalisation
+- **Live voltages**: Trojan, LFP, delta
+- **Inrush data**: last recorded inrush current and reconnect delta
+- **Editable settings**: all 10 configuration parameters
+- **Run Now button**: triggers immediate equalisation (SoC still enforced)
+- Auto-refreshes every 5 seconds
