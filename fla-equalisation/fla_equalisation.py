@@ -29,7 +29,7 @@ from dbus_status_service import (
 )
 from settings import Settings
 from alerting import raise_alarm, clear_alarm
-from web_server import start_web_server
+from web_server import start_web_server, update_cache, check_run_now, _cache
 
 # Logging setup
 LOG_FILE = "/data/log/fla-equalisation.log"
@@ -324,26 +324,74 @@ class FlaEqualisationService:
         log.info("FLA equalisation service started — checking every %ds", CHECK_INTERVAL_SEC)
 
     def _update_idle_status(self):
-        """Update status display with idle info."""
-        days = days_until_next(self.settings)
-        last = read_last_equalisation()
+        """Update status display and web cache with idle info."""
         v_trojan = self.monitor.get_trojan_voltage()
         v_lfp = self.monitor.get_lfp_voltage()
-        self.status.update(
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan and v_lfp) else None
+        self.status.update(state=STATE_IDLE, trojan_v=v_trojan, lfp_v=v_lfp)
+
+        # Update web cache
+        last = read_last_equalisation()
+        last_str = last.strftime("%Y-%m-%d %H:%M") if last else None
+        update_cache(
             state=STATE_IDLE,
+            time_remaining=0,
             trojan_v=v_trojan,
             lfp_v=v_lfp,
+            voltage_delta=delta,
+            last_eq=last_str,
+            days_until=days_until_next(self.settings),
+            settings={
+                "eq_voltage": self.settings.eq_voltage,
+                "eq_current_complete": self.settings.eq_current_complete,
+                "eq_timeout_hours": self.settings.eq_timeout_hours,
+                "float_voltage": self.settings.float_voltage,
+                "voltage_delta_max": self.settings.voltage_delta_max,
+                "days_between": self.settings.days_between,
+                "start_hour": self.settings.start_hour,
+                "end_hour": self.settings.end_hour,
+                "lfp_soc_min": self.settings.lfp_soc_min,
+                "enabled": self.settings.enabled,
+            },
         )
+
+    def _apply_pending_settings(self):
+        """Write any pending settings from web UI to D-Bus."""
+        pending = _cache.pop("pending_settings", None)
+        if not pending:
+            return
+        key_to_method = {
+            "eq_voltage": "eq_voltage",
+            "eq_current_complete": "eq_current_complete",
+            "eq_timeout_hours": "eq_timeout_hours",
+            "float_voltage": "float_voltage",
+            "voltage_delta_max": "voltage_delta_max",
+            "days_between": "days_between",
+            "start_hour": "start_hour",
+            "end_hour": "end_hour",
+            "lfp_soc_min": "lfp_soc_min",
+            "enabled": "enabled",
+        }
+        for key, value in pending.items():
+            if key in key_to_method:
+                self.settings._write(key_to_method[key], value)
+                log.info("Setting %s updated to %s via web UI", key, value)
 
     def _check(self):
         """Periodic check — called by GLib timer. Returns True to keep running."""
         if self._running:
-            return True  # Already running an equalisation, skip
+            return True
 
         try:
+            # Apply any pending settings from web UI
+            self._apply_pending_settings()
+
+            # Check web UI RunNow button
+            if check_run_now():
+                self.settings._write("run_now", 1)
+
             # Update idle status with live voltages
-            if self.status._service["/State"] == STATE_IDLE:
-                self._update_idle_status()
+            self._update_idle_status()
 
             if should_run(self.settings, self.monitor):
                 self._running = True
@@ -360,7 +408,7 @@ class FlaEqualisationService:
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
 
-        return True  # Always return True to keep the timer running
+        return True
 
 
 def main():
