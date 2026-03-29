@@ -122,5 +122,6 @@ class TempBatteryService:
             self._service["/Connected"] = 0
         except Exception as e:
             log.warning("Error deregistering service: %s", e)
+        self._service = None  # Release reference so GC can collect
         self._registered = False
         log.info("Temporary battery service deregistered")

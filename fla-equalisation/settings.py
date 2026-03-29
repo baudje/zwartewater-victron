@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 # Setting definitions: (path, default, min, max)
 SETTINGS_DEFS = {
-    "eq_voltage": ("/Settings/FlaEqualisation/EqualisationVoltage", 31.2, 28.0, 33.0),
+    "eq_voltage": ("/Settings/FlaEqualisation/EqualisationVoltage", 31.2, 28.0, 32.0),
     "eq_current_complete": ("/Settings/FlaEqualisation/EqualisationCurrentComplete", 8.0, 1.0, 50.0),
     "eq_timeout_hours": ("/Settings/FlaEqualisation/EqualisationTimeoutHours", 2.5, 0.5, 8.0),
     "float_voltage": ("/Settings/FlaEqualisation/FloatVoltage", 27.6, 24.0, 30.0),

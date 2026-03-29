@@ -90,12 +90,21 @@ class StatusService:
             "/Alarms/Equalisation", 0, writeable=True,
             gettextcallback=lambda a, x: {0: "OK", 1: "Warning", 2: "Alarm"}.get(x, "Unknown"),
         )
+        self._service.add_path(
+            "/InrushCurrent", None, writeable=True,
+            gettextcallback=lambda a, x: "{:.1f}A".format(x) if x is not None else "---",
+        )
+        self._service.add_path(
+            "/ReconnectDelta", None, writeable=True,
+            gettextcallback=lambda a, x: "{:.2f}V".format(x) if x is not None else "---",
+        )
 
         self._service.register()
         self._registered = True
         log.info("Status service registered on D-Bus")
 
-    def update(self, state=None, time_remaining=None, trojan_v=None, lfp_v=None):
+    def update(self, state=None, time_remaining=None, trojan_v=None, lfp_v=None,
+               inrush_current=None, reconnect_delta=None):
         """Update status values on D-Bus."""
         if not self._registered:
             return
@@ -110,6 +119,10 @@ class StatusService:
                 svc["/LfpVoltage"] = lfp_v
             if trojan_v is not None and lfp_v is not None:
                 svc["/VoltageDelta"] = round(abs(trojan_v - lfp_v), 2)
+            if inrush_current is not None:
+                svc["/InrushCurrent"] = inrush_current
+            if reconnect_delta is not None:
+                svc["/ReconnectDelta"] = reconnect_delta
 
     def set_alarm(self, level=2):
         """Set alarm level: 0=OK, 1=Warning, 2=Alarm."""

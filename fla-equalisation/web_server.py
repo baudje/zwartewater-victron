@@ -29,6 +29,8 @@ _cache = {
     "days_until_next": None,
     "settings": {},
     "run_now_requested": False,
+    "inrush_current": None,
+    "reconnect_delta": None,
 }
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -75,6 +77,8 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="row"><span class="label">Time remaining</span><span class="value" id="time">-</span></div>
   <div class="row"><span class="label">Last equalisation</span><span class="value" id="last">-</span></div>
   <div class="row"><span class="label">Next due in</span><span class="value" id="next">-</span></div>
+  <div class="row"><span class="label">Last inrush current</span><span class="value" id="inrush">-</span></div>
+  <div class="row"><span class="label">Last reconnect delta</span><span class="value" id="rdelta">-</span></div>
 </div>
 
 <div class="card">
@@ -143,6 +147,8 @@ function refresh() {
     document.getElementById("vtrojan").textContent=fmt(d.trojan_voltage,"V");
     document.getElementById("vlfp").textContent=fmt(d.lfp_voltage,"V");
     document.getElementById("delta").textContent=fmt(d.voltage_delta,"V");
+    document.getElementById("inrush").textContent=fmt(d.inrush_current,"A",1);
+    document.getElementById("rdelta").textContent=fmt(d.reconnect_delta,"V");
     if(d.settings){
       si("s_eqv",d.settings.eq_voltage); si("s_eqi",d.settings.eq_current_complete);
       si("s_timeout",d.settings.eq_timeout_hours); si("s_float",d.settings.float_voltage);
@@ -174,7 +180,8 @@ setInterval(refresh,5000);
 
 
 def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
-                 voltage_delta=None, last_eq=None, days_until=None, settings=None):
+                 voltage_delta=None, last_eq=None, days_until=None, settings=None,
+                 inrush_current=None, reconnect_delta=None):
     """Update the shared cache from the GLib main loop thread."""
     if state is not None:
         _cache["state"] = state
@@ -192,6 +199,10 @@ def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
         _cache["days_until_next"] = days_until
     if settings is not None:
         _cache["settings"] = settings
+    if inrush_current is not None:
+        _cache["inrush_current"] = inrush_current
+    if reconnect_delta is not None:
+        _cache["reconnect_delta"] = reconnect_delta
 
 
 def check_run_now():
