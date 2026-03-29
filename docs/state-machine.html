@@ -1,0 +1,1685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zwartewater FLA Equalisation — State Machine</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0d1b2a;
+    color: #c9d6e8;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  header {
+    background: #152b4e;
+    border-bottom: 2px solid #2a4a7f;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 {
+    font-size: 18px;
+    font-weight: 600;
+    color: #e8f0ff;
+    letter-spacing: 0.02em;
+  }
+  header .subtitle {
+    font-size: 12px;
+    color: #7a9bbf;
+    margin-top: 2px;
+  }
+  .badge {
+    background: #0a1628;
+    border: 1px solid #2a4a7f;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    color: #7a9bbf;
+    margin-left: auto;
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    grid-template-rows: auto auto;
+    gap: 0;
+    min-height: calc(100vh - 61px);
+  }
+
+  /* ─── Main diagram panel ─── */
+  .diagram-panel {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    padding: 24px;
+    overflow: auto;
+  }
+
+  /* ─── Side panel ─── */
+  .side-panel {
+    grid-column: 2;
+    grid-row: 1 / 3;
+    background: #0f2035;
+    border-left: 1px solid #1e3a5f;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .side-section {
+    border-bottom: 1px solid #1e3a5f;
+    padding: 16px;
+  }
+  .side-section h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #5a7fa0;
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+
+  /* State detail panel */
+  .state-detail {
+    flex: 1;
+    padding: 16px;
+    overflow-y: auto;
+  }
+  .state-detail h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #5a7fa0;
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+  .detail-placeholder {
+    color: #3a5a7a;
+    font-size: 12px;
+    font-style: italic;
+    padding: 8px 0;
+  }
+  .detail-card {
+    display: none;
+  }
+  .detail-card.active {
+    display: block;
+  }
+  .detail-card h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e8f0ff;
+    margin-bottom: 4px;
+  }
+  .detail-card .state-num {
+    font-size: 11px;
+    color: #5a7fa0;
+    margin-bottom: 12px;
+  }
+  .detail-card .detail-row {
+    margin-bottom: 10px;
+  }
+  .detail-card .detail-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #5a7fa0;
+    margin-bottom: 3px;
+  }
+  .detail-card .detail-value {
+    font-size: 12px;
+    color: #c9d6e8;
+    line-height: 1.6;
+  }
+  .detail-card .detail-value code {
+    background: #0a1628;
+    border: 1px solid #1e3a5f;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 11px;
+    color: #7dc8e8;
+    font-family: 'SF Mono', 'Cascadia Code', monospace;
+  }
+  .pill {
+    display: inline-block;
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    margin: 1px 2px 1px 0;
+  }
+  .pill-relay-closed { background: #1a4a2a; color: #4caf50; border: 1px solid #2a6a3a; }
+  .pill-relay-open   { background: #4a2a0a; color: #ff9800; border: 1px solid #6a4a1a; }
+  .pill-orion-off    { background: #1e3a5f; color: #5a9fbf; border: 1px solid #2a5a8f; }
+  .pill-orion-on     { background: #2a3a0a; color: #a0c040; border: 1px solid #4a5a1a; }
+  .pill-cvl          { background: #1a1a4a; color: #8080e8; border: 1px solid #2a2a7a; }
+  .guard-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 4px 0;
+    border-bottom: 1px solid #1e3a5f;
+    font-size: 11px;
+  }
+  .guard-item:last-child { border-bottom: none; }
+  .guard-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #ff9800;
+    flex-shrink: 0;
+    margin-top: 4px;
+  }
+  .guard-dot.green { background: #4caf50; }
+  .guard-dot.red   { background: #f44336; }
+
+  /* ─── SVG diagram ─── */
+  .diagram-wrap {
+    background: #0a1628;
+    border: 1px solid #1e3a5f;
+    border-radius: 8px;
+    overflow: visible;
+  }
+
+  svg text { user-select: none; }
+
+  /* State nodes */
+  .state-node { cursor: pointer; transition: filter 0.15s; }
+  .state-node:hover rect, .state-node:hover .node-bg {
+    filter: brightness(1.2);
+  }
+  .state-node.selected rect, .state-node.selected .node-bg {
+    filter: brightness(1.35);
+    stroke-width: 2.5 !important;
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid #1e3a5f;
+    background: #0a1628;
+  }
+  .tab {
+    padding: 10px 16px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #5a7fa0;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .tab:hover { color: #c9d6e8; }
+  .tab.active {
+    color: #6ab0f5;
+    border-bottom-color: #6ab0f5;
+  }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Section headings inside diagrams */
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #7a9bbf;
+    margin: 0 0 12px 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1e3a5f;
+    letter-spacing: 0.02em;
+  }
+
+  /* CVL Authority Chain */
+  .cvl-chain {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .cvl-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    transition: background 0.1s;
+  }
+  .cvl-row:hover { background: #1a2f48; }
+  .cvl-rank {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: #152b4e;
+    border: 1px solid #2a4a7f;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 700;
+    color: #6ab0f5;
+    flex-shrink: 0;
+  }
+  .cvl-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #c9d6e8;
+    flex: 1;
+  }
+  .cvl-value {
+    font-size: 11px;
+    color: #7a9bbf;
+    font-family: 'SF Mono', 'Cascadia Code', monospace;
+    text-align: right;
+  }
+  .cvl-arrow {
+    text-align: center;
+    color: #2a4a7f;
+    font-size: 14px;
+    padding: 0 32px;
+  }
+  .cvl-highest { border-left: 2px solid #f44336; }
+  .cvl-high    { border-left: 2px solid #ff9800; }
+  .cvl-mid     { border-left: 2px solid #4caf50; }
+  .cvl-low     { border-left: 2px solid #152b4e; }
+
+  /* Crash safety timeline */
+  .timeline {
+    position: relative;
+    padding-left: 24px;
+  }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 8px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background: linear-gradient(to bottom, #4caf50, #ff9800, #6ab0f5, #4caf50);
+  }
+  .tl-item {
+    position: relative;
+    padding: 6px 0 6px 16px;
+  }
+  .tl-dot {
+    position: absolute;
+    left: -12px;
+    top: 11px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    border: 2px solid #0a1628;
+  }
+  .tl-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #c9d6e8;
+    margin-bottom: 2px;
+  }
+  .tl-sub {
+    font-size: 11px;
+    color: #7a9bbf;
+    line-height: 1.5;
+  }
+  .tl-cvl {
+    font-family: 'SF Mono', 'Cascadia Code', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    margin-left: 4px;
+  }
+  .tl-cvl.safe    { color: #4caf50; }
+  .tl-cvl.eq      { color: #ff9800; }
+  .tl-cvl.float   { color: #6ab0f5; }
+
+  /* Startup recovery decision tree */
+  .decision-tree {
+    padding: 8px 0;
+  }
+  .dt-node {
+    background: #152b4e;
+    border: 1px solid #2a4a7f;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    color: #c9d6e8;
+  }
+  .dt-node.diamond {
+    background: #1a2f10;
+    border-color: #2a4f20;
+    position: relative;
+  }
+  .dt-node.ok     { background: #0a2a12; border-color: #1a4a22; color: #4caf50; }
+  .dt-node.warn   { background: #2a1a08; border-color: #4a3010; color: #ff9800; }
+  .dt-node.alarm  { background: #2a0a08; border-color: #4a1010; color: #f44336; }
+  .dt-branch {
+    display: flex;
+    gap: 8px;
+    margin: 4px 0 8px 16px;
+  }
+  .dt-branch-line {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+  }
+  .dt-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #5a7fa0;
+    text-align: center;
+    margin-bottom: 2px;
+  }
+
+  /* Safety guards table */
+  .guards-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+  .guards-table th {
+    text-align: left;
+    padding: 6px 8px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: #5a7fa0;
+    border-bottom: 1px solid #1e3a5f;
+  }
+  .guards-table td {
+    padding: 6px 8px;
+    color: #c9d6e8;
+    border-bottom: 1px solid #132030;
+    vertical-align: top;
+    line-height: 1.4;
+  }
+  .guards-table tr:hover td { background: #0f2035; }
+  .guard-name { font-weight: 600; color: #6ab0f5; white-space: nowrap; }
+  .guard-action { color: #7a9bbf; }
+
+  /* Legend */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 0;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #7a9bbf;
+  }
+  .legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .legend-dot.idle    { background: #4caf50; }
+  .legend-dot.normal  { background: #152b4e; border: 1px solid #2a5a9f; }
+  .legend-dot.active  { background: #e07000; }
+  .legend-dot.error   { background: #c62828; }
+
+  /* Tab panel padding */
+  .tab-content { padding: 20px; }
+
+  @media (max-width: 900px) {
+    .layout {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto;
+    }
+    .side-panel {
+      grid-column: 1;
+      grid-row: 2;
+      border-left: none;
+      border-top: 1px solid #1e3a5f;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Zwartewater FLA Equalisation — State Machine</h1>
+    <div class="subtitle">Venus OS · Cerbo GX · Trojan L16H-AC Equalisation Controller</div>
+  </div>
+  <span class="badge">ENI 03330190</span>
+</header>
+
+<div class="layout">
+
+  <!-- ═══════════════ MAIN DIAGRAM PANEL ═══════════════ -->
+  <div class="diagram-panel">
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('main')">Main State Machine</div>
+      <div class="tab" onclick="switchTab('timeline')">Crash Safety Timeline</div>
+      <div class="tab" onclick="switchTab('cvl')">CVL Authority</div>
+      <div class="tab" onclick="switchTab('startup')">Startup Recovery</div>
+      <div class="tab" onclick="switchTab('guards')">Safety Guards</div>
+    </div>
+
+    <!-- ─── TAB: Main State Machine ─── -->
+    <div class="tab-content active" id="tab-main">
+      <div class="diagram-wrap">
+        <svg id="main-svg" viewBox="0 0 900 780" width="100%" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <!-- Arrow markers -->
+            <marker id="arrowBlue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#4a7aaf"/>
+            </marker>
+            <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#4caf50"/>
+            </marker>
+            <marker id="arrowOrange" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#ff9800"/>
+            </marker>
+            <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#f44336"/>
+            </marker>
+            <marker id="arrowGrey" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#3a5a7a"/>
+            </marker>
+
+            <!-- Glow filters -->
+            <filter id="glow-green">
+              <feGaussianBlur stdDeviation="3" result="blur"/>
+              <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+            <filter id="glow-orange">
+              <feGaussianBlur stdDeviation="3" result="blur"/>
+              <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+
+            <!-- Gradient backgrounds for nodes -->
+            <linearGradient id="grad-idle" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#2a6a30"/>
+              <stop offset="100%" stop-color="#1a4a20"/>
+            </linearGradient>
+            <linearGradient id="grad-normal" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#1e3f6e"/>
+              <stop offset="100%" stop-color="#102848"/>
+            </linearGradient>
+            <linearGradient id="grad-active" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#c07000"/>
+              <stop offset="100%" stop-color="#8a4e00"/>
+            </linearGradient>
+            <linearGradient id="grad-error" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#8a1010"/>
+              <stop offset="100%" stop-color="#5a0808"/>
+            </linearGradient>
+          </defs>
+
+          <!-- ─── BACKGROUND GRID (subtle) ─── -->
+          <rect width="900" height="780" fill="#080f1a" rx="8"/>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#0f1e30" stroke-width="0.5"/>
+          </pattern>
+          <rect width="900" height="780" fill="url(#grid)" rx="8"/>
+
+          <!-- ─── LAYOUT: states arranged vertically on left, Error on right ─── -->
+          <!--
+            Column A (x=140):  States 0-7 down the left side
+            Column B (x=680):  State 8 Error
+          -->
+
+          <!-- ─── ARROWS ─── -->
+
+          <!-- 0 Idle → 1 Stopping -->
+          <line x1="140" y1="97" x2="140" y2="163" stroke="#4caf50" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="none"/>
+          <rect x="152" y="116" width="190" height="28" rx="4" fill="#060e18" opacity="0.9"/>
+          <text x="247" y="129" text-anchor="middle" fill="#4caf50" font-size="9.5" font-weight="600">conditions met OR RunNow</text>
+          <text x="247" y="141" text-anchor="middle" fill="#3a7a40" font-size="9">(SoC ≥ 95% always enforced)</text>
+
+          <!-- 1 Stopping → 2 Disconnecting -->
+          <line x1="140" y1="237" x2="140" y2="303" stroke="#4a7aaf" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+          <rect x="152" y="256" width="120" height="18" rx="4" fill="#060e18" opacity="0.9"/>
+          <text x="212" y="269" text-anchor="middle" fill="#4a7aaf" font-size="9.5">relay open + verified</text>
+
+          <!-- 2 Disconnecting → 3 Equalising -->
+          <line x1="140" y1="377" x2="140" y2="443" stroke="#4a7aaf" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+          <rect x="152" y="395" width="120" height="18" rx="4" fill="#060e18" opacity="0.9"/>
+          <text x="212" y="408" text-anchor="middle" fill="#4a7aaf" font-size="9.5">relay open verified</text>
+
+          <!-- 3 Equalising → 4 Cooling -->
+          <line x1="140" y1="517" x2="140" y2="583" stroke="#ff9800" stroke-width="1.5" marker-end="url(#arrowOrange)"/>
+          <rect x="152" y="532" width="188" height="28" rx="4" fill="#060e18" opacity="0.9"/>
+          <text x="246" y="545" text-anchor="middle" fill="#ff9800" font-size="9.5" font-weight="600">I &lt; 8A  OR  2.5hr timeout</text>
+          <text x="246" y="557" text-anchor="middle" fill="#c07000" font-size="9">OR i_trojan=None for 5 min</text>
+
+          <!-- 4 Cooling → 5 Voltage Matching -->
+          <line x1="140" y1="657" x2="140" y2="703" stroke="#4a7aaf" stroke-width="1.5" marker-end="url(#arrowBlue)"/>
+          <rect x="152" y="666" width="120" height="18" rx="4" fill="#060e18" opacity="0.9"/>
+          <text x="212" y="679" text-anchor="middle" fill="#4a7aaf" font-size="9.5">CVL → 27.6V (float)</text>
+
+          <!-- 5 Voltage Matching → 6 Reconnecting (right-side path looping back up) -->
+          <!-- We'll use a curved path going right from state 5 to state 6 up above -->
+          <!-- State 5 is at x=140 y=725 center, state 6 is at x=460 y=583 -->
+          <!-- Let's keep all states in one column and add state 6,7 in col B -->
+
+          <!-- The layout I'll use:
+               States 0-5 in column at cx=140 y: 70,200,340,480,620,725
+               States 6,7 in column at cx=480 y: 725, 620
+               State 8 at cx=720 y=200
+          -->
+
+          <!-- I'll redo this with proper coordinates via groups and recalculate.
+               Let me use a top-down layout with states 0-7 as a loop and 8 as an exit.
+
+               Positions (cx, cy):
+               0: Idle           180,  70
+               1: Stopping       180, 200
+               2: Disconnecting  180, 340
+               3: Equalising     180, 480
+               4: Cooling        180, 610
+               5: Volt Matching  420, 610
+               6: Reconnecting   420, 480
+               7: Restarting     420, 340
+               8: Error          660, 390
+
+               Loop: 7 → (curve back to 0)
+          -->
+
+          <!-- I need to rewrite the SVG properly. Let me clear and start fresh. -->
+
+        </svg>
+      </div>
+      <!-- Replaced above with proper inline SVG below -->
+    </div>
+
+    <!-- ─── TAB: Crash Safety Timeline ─── -->
+    <div class="tab-content" id="tab-timeline">
+      <p class="section-title">CVL Active at Each Step — Crash Safety</p>
+      <div class="timeline">
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#4caf50"></div>
+          <div class="tl-title">T+0 — Normal Operation</div>
+          <div class="tl-sub">Relay closed. CVL <span class="tl-cvl safe">28.4V</span> from aggregate/99. LFPs on bus. Orion off.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#4caf50"></div>
+          <div class="tl-title">T+1 — Register Temp Service</div>
+          <div class="tl-sub">Temp service at <span class="tl-cvl safe">28.4V</span> registered alongside aggregate. DVCC still reads agg/99 (lower instance wins). Safe for LFPs.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#4caf50"></div>
+          <div class="tl-title">T+2-T+7 — Stop Aggregate Driver</div>
+          <div class="tl-sub">DVCC now reads temp/100 at <span class="tl-cvl safe">28.4V</span>. Relay still closed. Crash here: startup finds relay closed → idle.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#ff9800"></div>
+          <div class="tl-title">T+7-T+17 — Open Relay, Verify</div>
+          <div class="tl-sub">Relay opens. Orion activates. CVL still <span class="tl-cvl safe">28.4V</span>. LFPs now on Orion. Crash here: relay open, delta likely &lt;2V → auto-close.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#ff9800"></div>
+          <div class="tl-title">T+17 — Raise CVL to EQ Voltage</div>
+          <div class="tl-sub">Only after relay open verified. CVL raised to <span class="tl-cvl eq">31.2V</span>. LFPs protected on Orion. Crash here: temp dies → no CVL → Quattro stops charging. LFPs still safe on Orion.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#ff9800"></div>
+          <div class="tl-title">T+18-T+168 — Equalising FLA</div>
+          <div class="tl-sub">Quattro charges Trojans at <span class="tl-cvl eq">31.2V</span>. Monitor I_trojan. Detect Orion failure (V_lfp drop &gt;0.5V). 2.5hr hard timeout.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#6ab0f5"></div>
+          <div class="tl-title">T+169 — Cooling Down</div>
+          <div class="tl-sub">EQ complete (I &lt; 8A). CVL reduced to <span class="tl-cvl float">27.6V</span> (float). LFPs still on Orion. Quattro begins float mode.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#6ab0f5"></div>
+          <div class="tl-title">T+199 — Voltage Matching</div>
+          <div class="tl-sub">Wait for |V_trojan − V_lfp| &lt; 1V. CVL <span class="tl-cvl float">27.6V</span>. Max 4hr timeout. SmartShunt Trojan must be responsive.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#4caf50"></div>
+          <div class="tl-title">T+230 — Reconnect LFP</div>
+          <div class="tl-sub">Close relay. Verify via read-back. Measure inrush current + reconnect delta. CVL <span class="tl-cvl float">27.6V</span>.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#4caf50"></div>
+          <div class="tl-title">T+234 — Restart Aggregate Driver</div>
+          <div class="tl-sub">Deregister temp service. Restart aggregate/99. Brief gap with no CVL — safe as relay is closed and both banks on bus.</div>
+        </div>
+
+        <div class="tl-item">
+          <div class="tl-dot" style="background:#4caf50"></div>
+          <div class="tl-title">T+244 — Normal Operation Restored</div>
+          <div class="tl-sub">Aggregate/99 running. DVCC reads CVL <span class="tl-cvl safe">28.4V</span>. Record timestamp. 90-day interval resets.</div>
+        </div>
+
+      </div>
+
+      <div style="margin-top:24px; background:#0a1628; border:1px solid #1e3a5f; border-radius:6px; padding:14px;">
+        <div class="section-title">Key Safety Invariant</div>
+        <p style="font-size:12px; color:#c9d6e8; line-height:1.7;">
+          CVL is <strong style="color:#f44336">never raised above 28.4V while the relay is closed</strong>.
+          The 31.2V equalisation voltage is only applied after relay open is verified with a D-Bus read-back.
+          If the service crashes while equalising at 31.2V, the temp battery service disappears,
+          the Quattro sees no CVL and stops charging — the LFPs remain safely powered by the Orion DC-DC.
+        </p>
+      </div>
+    </div>
+
+    <!-- ─── TAB: CVL Authority Chain ─── -->
+    <div class="tab-content" id="tab-cvl">
+      <p class="section-title">CVL Authority Chain — Priority Hierarchy</p>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+
+        <div>
+          <p style="font-size:11px; color:#5a7fa0; text-transform:uppercase; letter-spacing:.07em; margin-bottom:12px; font-weight:600;">Normal Operation</p>
+          <div class="cvl-chain">
+            <div class="cvl-row cvl-highest">
+              <div class="cvl-rank">1</div>
+              <div>
+                <div class="cvl-name">JK BMS Hardware MOSFET</div>
+                <div style="font-size:10px;color:#5a7fa0">Physical disconnect, can't be overridden</div>
+              </div>
+              <div class="cvl-value">3.65V/cell<br><span style="color:#f44336">CUTS OFF</span></div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-high">
+              <div class="cvl-rank">2</div>
+              <div>
+                <div class="cvl-name">serialbattery CVCM</div>
+                <div style="font-size:10px;color:#5a7fa0">Taper: 100% @ 3.30V → 0% @ 3.65V</div>
+              </div>
+              <div class="cvl-value">3.30–3.65V</div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-mid">
+              <div class="cvl-rank">3</div>
+              <div>
+                <div class="cvl-name">Aggregate Battery CVL</div>
+                <div style="font-size:10px;color:#5a7fa0">Normal 3.55V, balancing 3.60V, dynamic reduction at 3.65V</div>
+              </div>
+              <div class="cvl-value">28.4V / 28.8V</div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-low">
+              <div class="cvl-rank">4</div>
+              <div>
+                <div class="cvl-name">DVCC MaxChargeVoltage</div>
+                <div style="font-size:10px;color:#5a7fa0">Reads from active battery service (inst 99)</div>
+              </div>
+              <div class="cvl-value">→ Quattro</div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-low">
+              <div class="cvl-rank">5</div>
+              <div>
+                <div class="cvl-name">Quattro II</div>
+                <div style="font-size:10px;color:#5a7fa0">Charges up to DVCC limit; ESS/Bulk/Absorption/Float</div>
+              </div>
+              <div class="cvl-value">≤ DVCC CVL</div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <p style="font-size:11px; color:#5a7fa0; text-transform:uppercase; letter-spacing:.07em; margin-bottom:12px; font-weight:600;">During FLA Equalisation</p>
+          <div class="cvl-chain">
+            <div class="cvl-row cvl-highest">
+              <div class="cvl-rank">1</div>
+              <div>
+                <div class="cvl-name">JK BMS Hardware MOSFET</div>
+                <div style="font-size:10px;color:#5a7fa0">Not relevant — LFPs disconnected from bus</div>
+              </div>
+              <div class="cvl-value" style="color:#3a5a7a">N/A</div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-high">
+              <div class="cvl-rank">2</div>
+              <div>
+                <div class="cvl-name">serialbattery CVCM</div>
+                <div style="font-size:10px;color:#5a7fa0">Still running, DVCC ignores its CVL during EQ</div>
+              </div>
+              <div class="cvl-value" style="color:#3a5a7a">Ignored</div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-mid">
+              <div class="cvl-rank">3</div>
+              <div>
+                <div class="cvl-name">Temp Battery Service CVL</div>
+                <div style="font-size:10px;color:#5a7fa0">Phases: 28.4V → 31.2V → 27.6V</div>
+              </div>
+              <div class="cvl-value">
+                <span style="color:#4caf50">28.4V</span><br>
+                <span style="color:#ff9800">31.2V</span><br>
+                <span style="color:#6ab0f5">27.6V</span>
+              </div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-low">
+              <div class="cvl-rank">4</div>
+              <div>
+                <div class="cvl-name">DVCC MaxChargeVoltage</div>
+                <div style="font-size:10px;color:#5a7fa0">Reads from temp service (inst 100)</div>
+              </div>
+              <div class="cvl-value">→ Quattro</div>
+            </div>
+            <div class="cvl-arrow">↓</div>
+            <div class="cvl-row cvl-low">
+              <div class="cvl-rank">5</div>
+              <div>
+                <div class="cvl-name">Quattro II</div>
+                <div style="font-size:10px;color:#5a7fa0">Follows DVCC command; charges Trojans to EQ voltage</div>
+              </div>
+              <div class="cvl-value">≤ DVCC CVL</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <div style="margin-top:24px; background:#0a1628; border:1px solid #1e3a5f; border-radius:6px; padding:14px;">
+        <p class="section-title">CVL Phase Transitions</p>
+        <div style="display:flex; gap:0; align-items:stretch; font-size:11px; overflow-x:auto;">
+          <div style="flex:1; background:#1a2f10; border:1px solid #2a4f20; border-radius:4px 0 0 4px; padding:10px 12px; min-width:120px;">
+            <div style="color:#4caf50; font-weight:700; margin-bottom:4px;">Phase 1</div>
+            <div style="font-size:16px; font-weight:700; color:#4caf50; font-family:monospace;">28.4V</div>
+            <div style="color:#3a6a30; margin-top:4px;">Relay closed<br>Both banks on bus<br>Safe for LFPs</div>
+          </div>
+          <div style="width:36px; display:flex; align-items:center; justify-content:center; background:#0a1628; color:#ff9800; font-size:16px; border-top:1px solid #1e3a5f; border-bottom:1px solid #1e3a5f;">→</div>
+          <div style="flex:1; background:#2a1a08; border:1px solid #4a3010; padding:10px 12px; min-width:120px;">
+            <div style="color:#ff9800; font-weight:700; margin-bottom:4px;">Phase 2</div>
+            <div style="font-size:16px; font-weight:700; color:#ff9800; font-family:monospace;">31.2V</div>
+            <div style="color:#7a4a18; margin-top:4px;">Relay open<br>LFPs on Orion<br>Trojans only</div>
+          </div>
+          <div style="width:36px; display:flex; align-items:center; justify-content:center; background:#0a1628; color:#6ab0f5; font-size:16px; border-top:1px solid #1e3a5f; border-bottom:1px solid #1e3a5f;">→</div>
+          <div style="flex:1; background:#0a1828; border:1px solid #1a3050; padding:10px 12px; min-width:120px;">
+            <div style="color:#6ab0f5; font-weight:700; margin-bottom:4px;">Phase 3</div>
+            <div style="font-size:16px; font-weight:700; color:#6ab0f5; font-family:monospace;">27.6V</div>
+            <div style="color:#3a6080; margin-top:4px;">Relay open<br>Cooling / matching<br>Float voltage</div>
+          </div>
+          <div style="width:36px; display:flex; align-items:center; justify-content:center; background:#0a1628; color:#4caf50; font-size:16px; border-top:1px solid #1e3a5f; border-bottom:1px solid #1e3a5f;">→</div>
+          <div style="flex:1; background:#1a2f10; border:1px solid #2a4f20; border-radius:0 4px 4px 0; padding:10px 12px; min-width:120px;">
+            <div style="color:#4caf50; font-weight:700; margin-bottom:4px;">Phase 4</div>
+            <div style="font-size:16px; font-weight:700; color:#4caf50; font-family:monospace;">28.4V</div>
+            <div style="color:#3a6a30; margin-top:4px;">Relay closed<br>Aggregate CVL<br>Normal operation</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB: Startup Recovery ─── -->
+    <div class="tab-content" id="tab-startup">
+      <p class="section-title">Startup / Crash Recovery Decision Tree (CRIT-4)</p>
+      <p style="font-size:12px; color:#7a9bbf; margin-bottom:20px;">
+        Runs on every service start: boot, crash recovery, firmware update, watchdog trigger.
+        Implemented in <code style="background:#0a1628; border:1px solid #1e3a5f; border-radius:3px; padding:1px 5px; font-size:11px; color:#7dc8e8;">_startup_safety_check()</code>
+      </p>
+
+      <div class="decision-tree">
+
+        <!-- Start node -->
+        <div class="dt-node" style="text-align:center; background:#1a2f48; border-color:#2a5a8f; max-width:360px; margin:0 auto 8px auto;">
+          <strong style="color:#6ab0f5">SERVICE START</strong><br>
+          <span style="font-size:11px; color:#5a7fa0">boot / crash / manual restart</span>
+        </div>
+
+        <div style="text-align:center; color:#3a5a7a; font-size:20px; line-height:1.2; margin:4px 0;">↓</div>
+
+        <!-- Read relay -->
+        <div class="dt-node diamond" style="text-align:center; max-width:360px; margin:0 auto 8px auto;">
+          <strong>Read Relay 2 State</strong><br>
+          <span style="font-size:11px; color:#5a7fa0">D-Bus: /Relay/1/State</span>
+        </div>
+
+        <!-- Branch: closed vs open -->
+        <div style="display:flex; gap:20px; max-width:700px; margin:0 auto;">
+
+          <div style="flex:1;">
+            <div style="text-align:center; color:#4caf50; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; margin-bottom:6px;">Relay = CLOSED (1)</div>
+            <div class="dt-node ok" style="text-align:center;">
+              ✓ Normal idle<br>
+              <span style="font-size:11px;">No action needed.<br>Proceed to idle loop.</span>
+            </div>
+          </div>
+
+          <div style="flex:1;">
+            <div style="text-align:center; color:#ff9800; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.07em; margin-bottom:6px;">Relay = OPEN (0)</div>
+            <div class="dt-node warn" style="text-align:center;">
+              ⚠ Interrupted equalisation<br>
+              <span style="font-size:11px;">Read V_trojan and V_lfp</span>
+            </div>
+
+            <div style="text-align:center; color:#3a5a7a; font-size:20px; line-height:1.2; margin:4px 0;">↓</div>
+
+            <!-- Sub-branch -->
+            <div style="display:flex; gap:8px;">
+
+              <div style="flex:1;">
+                <div style="text-align:center; color:#4caf50; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">delta &lt; 2V</div>
+                <div class="dt-node ok" style="padding:8px 10px;">
+                  <div style="font-size:11px;">Auto-close relay</div>
+                  <div style="font-size:10px; color:#3a7a40; margin-top:4px;">Log recovery event<br>Proceed to idle</div>
+                </div>
+              </div>
+
+              <div style="flex:1;">
+                <div style="text-align:center; color:#f44336; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">delta ≥ 2V</div>
+                <div class="dt-node alarm" style="padding:8px 10px;">
+                  <div style="font-size:11px;">ALARM — stay open</div>
+                  <div style="font-size:10px; color:#7a2020; margin-top:4px;">Manual intervention<br>Restart agg driver</div>
+                </div>
+              </div>
+
+              <div style="flex:1;">
+                <div style="text-align:center; color:#f44336; font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px;">Unreadable</div>
+                <div class="dt-node alarm" style="padding:8px 10px;">
+                  <div style="font-size:11px;">ALARM — stay open</div>
+                  <div style="font-size:10px; color:#7a2020; margin-top:4px;">SmartShunt offline<br>Manual intervention</div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <div style="margin-top:24px; background:#0a1628; border:1px solid #1e3a5f; border-radius:6px; padding:14px;">
+        <p class="section-title">Cerbo Reboot During Equalisation</p>
+        <div style="display:flex; flex-direction:column; gap:6px; font-size:12px; color:#c9d6e8; line-height:1.6;">
+          <div style="display:flex; gap:8px;"><span style="color:#5a7fa0; width:20px; text-align:right;">1.</span><span>Cerbo reboots (shore power loss, firmware update, watchdog)</span></div>
+          <div style="display:flex; gap:8px;"><span style="color:#5a7fa0; width:20px; text-align:right;">2.</span><span><code style="background:#152b4e; border-radius:3px; padding:1px 5px; font-size:11px; color:#7dc8e8;">/data/rc.local</code> recreates <code style="background:#152b4e; border-radius:3px; padding:1px 5px; font-size:11px; color:#7dc8e8;">/service/fla-equalisation</code> symlink</span></div>
+          <div style="display:flex; gap:8px;"><span style="color:#5a7fa0; width:20px; text-align:right;">3.</span><span>Daemontools starts <code style="background:#152b4e; border-radius:3px; padding:1px 5px; font-size:11px; color:#7dc8e8;">fla_equalisation.py</code></span></div>
+          <div style="display:flex; gap:8px;"><span style="color:#5a7fa0; width:20px; text-align:right;">4.</span><span><code style="background:#152b4e; border-radius:3px; padding:1px 5px; font-size:11px; color:#7dc8e8;">_startup_safety_check()</code> runs — checks relay state and voltage delta</span></div>
+          <div style="display:flex; gap:8px;"><span style="color:#5a7fa0; width:20px; text-align:right;">5.</span><span>Aggregate driver also restarts via rc.local (independent process)</span></div>
+          <div style="display:flex; gap:8px;"><span style="color:#5a7fa0; width:20px; text-align:right;">6.</span><span>System returns to normal operation or error state for manual check</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── TAB: Safety Guards ─── -->
+    <div class="tab-content" id="tab-guards">
+      <p class="section-title">Safety Guards &amp; Recovery Actions</p>
+      <table class="guards-table">
+        <thead>
+          <tr>
+            <th>Guard</th>
+            <th>Trigger</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="guard-name">Crash-safe CVL</td>
+            <td>Service crash before relay opens</td>
+            <td class="guard-action">Temp service at 28.4V (safe for LFPs), never 31.2V while relay is closed</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Delta-aware finally</td>
+            <td>Any abort with relay open</td>
+            <td class="guard-action">Only closes relay if |delta| &lt; 2V; otherwise raises alarm and stays open</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Startup recovery</td>
+            <td>Service start with relay open</td>
+            <td class="guard-action">Checks voltage delta, auto-closes (&lt;2V) or alarms and stays open (≥2V)</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Relay verification</td>
+            <td>After relay open AND close commands</td>
+            <td class="guard-action">Reads back D-Bus hardware state; aborts if read-back does not match command</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Orion failure</td>
+            <td>V_lfp drops &gt; 0.5V during EQ</td>
+            <td class="guard-action">Abort equalisation, reconnect LFP (delta-aware)</td>
+          </tr>
+          <tr>
+            <td class="guard-name">SmartShunt Trojan</td>
+            <td>V_trojan = None (shunt offline)</td>
+            <td class="guard-action">Abort in both Equalising and Voltage Matching states</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Current loss</td>
+            <td>i_trojan = None for 5 minutes</td>
+            <td class="guard-action">Proceed to voltage matching (not full 2.5hr timeout)</td>
+          </tr>
+          <tr>
+            <td class="guard-name">High current warning</td>
+            <td>Trojan I &gt; 60A during EQ</td>
+            <td class="guard-action">Warning only — dynamo or MPPT detected, continue EQ</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Voltage match timeout</td>
+            <td>&gt; 4 hours in Voltage Matching</td>
+            <td class="guard-action">Alarm raised, stay disconnected, manual intervention required</td>
+          </tr>
+          <tr>
+            <td class="guard-name">SoC enforcement</td>
+            <td>RunNow with LFP SoC &lt; 95%</td>
+            <td class="guard-action">Refused — SoC requirement is never bypassed, even with RunNow</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Inrush monitoring</td>
+            <td>After relay reconnect</td>
+            <td class="guard-action">Measures &amp; logs inrush current + delta; displayed on web UI for calibration</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Bounds validation</td>
+            <td>Web UI setting change</td>
+            <td class="guard-action">Checked against min/max bounds before D-Bus write</td>
+          </tr>
+          <tr>
+            <td class="guard-name">Double trigger</td>
+            <td>RunNow race condition</td>
+            <td class="guard-action">RunNow flag cleared when equalisation starts</td>
+          </tr>
+          <tr>
+            <td class="guard-name">LFP current check</td>
+            <td>Before relay open</td>
+            <td class="guard-action">Verify LFP current &lt; 5A before opening relay to avoid large inrush on open</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div style="margin-top:20px; display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <div style="background:#0a1628; border:1px solid #1e3a5f; border-radius:6px; padding:14px;">
+          <p class="section-title">Scheduling Conditions</p>
+          <div style="font-size:11px; color:#c9d6e8; line-height:1.7;">
+            <div style="display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid #132030;"><span>Enabled</span><span style="color:#4caf50">Settings flag</span></div>
+            <div style="display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid #132030;"><span>Interval elapsed</span><span style="color:#6ab0f5">≥ 90 days since last EQ</span></div>
+            <div style="display:flex; justify-content:space-between; padding:3px 0; border-bottom:1px solid #132030;"><span>Afternoon window</span><span style="color:#6ab0f5">14:00–17:00 local</span></div>
+            <div style="display:flex; justify-content:space-between; padding:3px 0;"><span><strong>LFP SoC ≥ 95%</strong></span><span style="color:#f44336">NEVER bypassed</span></div>
+          </div>
+          <div style="margin-top:8px; font-size:10px; color:#5a7fa0;">
+            RunNow bypasses all conditions except SoC. The SoC requirement protects against equalising with depleted LFPs.
+          </div>
+        </div>
+        <div style="background:#0a1628; border:1px solid #1e3a5f; border-radius:6px; padding:14px;">
+          <p class="section-title">Error Recovery Sequence</p>
+          <div style="font-size:11px; color:#c9d6e8; line-height:1.7;">
+            <div style="padding:3px 0; border-bottom:1px solid #132030;"><span style="color:#5a7fa0">1.</span> Deregister temp battery service</div>
+            <div style="padding:3px 0; border-bottom:1px solid #132030;"><span style="color:#5a7fa0">2.</span> Check relay state in finally block</div>
+            <div style="padding:3px 0; border-bottom:1px solid #132030;"><span style="color:#4caf50">3a.</span> delta &lt; 2V → auto-close relay</div>
+            <div style="padding:3px 0; border-bottom:1px solid #132030;"><span style="color:#f44336">3b.</span> delta ≥ 2V → alarm, stay open</div>
+            <div style="padding:3px 0;"><span style="color:#5a7fa0">4.</span> Restart aggregate driver if stopped</div>
+          </div>
+          <div style="margin-top:8px; font-size:10px; color:#5a7fa0;">
+            LFPs remain safely on Orion DC-DC in either outcome until relay is manually closed.
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- ═══════════════ SIDE PANEL ═══════════════ -->
+  <div class="side-panel">
+
+    <!-- Legend -->
+    <div class="side-section">
+      <h2>Legend</h2>
+      <div class="legend">
+        <div class="legend-item"><div class="legend-dot idle"></div>Idle / Success</div>
+        <div class="legend-item"><div class="legend-dot normal"></div>Normal state</div>
+        <div class="legend-item"><div class="legend-dot active"></div>Active / Transitioning</div>
+        <div class="legend-item"><div class="legend-dot error"></div>Error state</div>
+      </div>
+    </div>
+
+    <!-- State detail -->
+    <div class="state-detail">
+      <h2>State Detail</h2>
+
+      <div class="detail-placeholder" id="detail-placeholder">Click a state in the diagram to see details.</div>
+
+      <!-- State 0: Idle -->
+      <div class="detail-card" id="detail-0">
+        <h3>Idle</h3>
+        <div class="state-num">State 0</div>
+        <div class="detail-row">
+          <div class="detail-label">Status</div>
+          <div class="detail-value">Normal operation. Checks conditions every 60 seconds. Web UI updated with live voltages.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-closed">Relay CLOSED</span>
+            <span class="pill pill-orion-off">Orion OFF</span>
+            <span class="pill pill-cvl">CVL 28.4V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Transition conditions</div>
+          <div class="detail-value">All of: enabled, ≥90 days elapsed, 14:00–17:00, SoC ≥ 95%<br>OR: RunNow (SoC still enforced)</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Active battery service</div>
+          <div class="detail-value"><code>aggregate/99</code></div>
+        </div>
+      </div>
+
+      <!-- State 1: Stopping Driver -->
+      <div class="detail-card" id="detail-1">
+        <h3>Stopping Driver</h3>
+        <div class="state-num">State 1</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">1. Register temp battery service at <strong>28.4V</strong> (safe for LFPs)<br>2. Stop aggregate driver (<code>svc -d</code>)<br>3. Verify DVCC switches to temp/100</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-closed">Relay CLOSED</span>
+            <span class="pill pill-orion-off">Orion OFF</span>
+            <span class="pill pill-cvl">CVL 28.4V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Crash safety</div>
+          <div class="detail-value">Temp service at 28.4V coexists with aggregate. DVCC uses lowest instance (agg/99 wins while both exist). Both banks safe.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Active battery service</div>
+          <div class="detail-value"><code>temp/100</code> (after agg stops)</div>
+        </div>
+      </div>
+
+      <!-- State 2: Disconnecting LFP -->
+      <div class="detail-card" id="detail-2">
+        <h3>Disconnecting LFP</h3>
+        <div class="state-num">State 2</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">1. Open Cerbo relay 2<br>2. Verify: LFP current &lt; 5A<br>3. Read-back relay state (abort on mismatch)<br>4. Record V_lfp at disconnect<br>5. Raise CVL to <strong>31.2V</strong> (only after verified open)</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-open">Relay OPEN</span>
+            <span class="pill pill-orion-on">Orion ON</span>
+            <span class="pill pill-cvl">CVL 28.4V → 31.2V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Critical invariant</div>
+          <div class="detail-value">CVL raised to 31.2V <strong>only after</strong> relay open is confirmed via read-back.</div>
+        </div>
+      </div>
+
+      <!-- State 3: Equalising FLA -->
+      <div class="detail-card" id="detail-3">
+        <h3>Equalising FLA</h3>
+        <div class="state-num">State 3</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">Monitor SmartShunt Trojan current. Detect Orion failure (V_lfp drop &gt;0.5V). Warn if I_trojan &gt;60A.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-open">Relay OPEN</span>
+            <span class="pill pill-orion-on">Orion ON</span>
+            <span class="pill pill-cvl">CVL 31.2V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Exit conditions</div>
+          <div class="detail-value">I_trojan &lt; 8A (EQ complete)<br>OR 2.5 hour hard timeout<br>OR i_trojan = None for 5 min</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Crash safety</div>
+          <div class="detail-value">Temp service dies → no CVL → Quattro stops charging. LFPs still safe on Orion.</div>
+        </div>
+      </div>
+
+      <!-- State 4: Cooling Down -->
+      <div class="detail-card" id="detail-4">
+        <h3>Cooling Down</h3>
+        <div class="state-num">State 4</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">Reduce CVL to <strong>27.6V</strong> (float voltage). Trojans cool down at float. Wait for V_trojan to stabilise before voltage matching.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-open">Relay OPEN</span>
+            <span class="pill pill-orion-on">Orion ON</span>
+            <span class="pill pill-cvl">CVL 27.6V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Transitions to</div>
+          <div class="detail-value">Voltage Matching (immediate, after CVL set)</div>
+        </div>
+      </div>
+
+      <!-- State 5: Voltage Matching -->
+      <div class="detail-card" id="detail-5">
+        <h3>Voltage Matching</h3>
+        <div class="state-num">State 5</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">Wait for |V_trojan − V_lfp| &lt; 1V. Check SmartShunt Trojan is responsive. Poll voltage delta periodically.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-open">Relay OPEN</span>
+            <span class="pill pill-orion-on">Orion ON</span>
+            <span class="pill pill-cvl">CVL 27.6V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Exit conditions</div>
+          <div class="detail-value">delta &lt; 1V → Reconnecting<br>Timeout &gt;4hr → Alarm, stay open<br>V_trojan = None → Error</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Max wait</div>
+          <div class="detail-value">4 hours. After that: alarm raised, relay stays open, manual intervention.</div>
+        </div>
+      </div>
+
+      <!-- State 6: Reconnecting LFP -->
+      <div class="detail-card" id="detail-6">
+        <h3>Reconnecting LFP</h3>
+        <div class="state-num">State 6</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">1. Close relay 2<br>2. Verify: relay state read-back = closed<br>3. Measure inrush current (SmartShunt LFP, 1s after close)<br>4. Record reconnect delta</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-closed">Relay CLOSED</span>
+            <span class="pill pill-orion-off">Orion OFF</span>
+            <span class="pill pill-cvl">CVL 27.6V</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Inrush calibration</div>
+          <div class="detail-value">Inrush &lt;50A → delta threshold can increase. Inrush &gt;100A → reduce delta threshold to protect relay contacts.</div>
+        </div>
+      </div>
+
+      <!-- State 7: Restarting Driver -->
+      <div class="detail-card" id="detail-7">
+        <h3>Restarting Driver</h3>
+        <div class="state-num">State 7</div>
+        <div class="detail-row">
+          <div class="detail-label">Actions</div>
+          <div class="detail-value">1. Deregister temp battery service<br>2. Restart aggregate driver (<code>svc -u</code>)<br>3. Invalidate service cache<br>4. Record equalisation timestamp</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">System state</div>
+          <div class="detail-value">
+            <span class="pill pill-relay-closed">Relay CLOSED</span>
+            <span class="pill pill-orion-off">Orion OFF</span>
+            <span class="pill pill-cvl">CVL — briefly</span>
+          </div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Brief gap</div>
+          <div class="detail-value">When temp service deregisters and aggregate not yet running: no CVL briefly. Safe — relay closed, both banks on bus, Quattro holds.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Active battery service</div>
+          <div class="detail-value"><code>aggregate/99</code> (restored after ~10s)</div>
+        </div>
+      </div>
+
+      <!-- State 8: Error -->
+      <div class="detail-card" id="detail-8">
+        <h3>Error</h3>
+        <div class="state-num">State 8</div>
+        <div class="detail-row">
+          <div class="detail-label">Causes</div>
+          <div class="detail-value">Relay verification mismatch, Orion failure, SmartShunt offline, timeout exceeded, unexpected exception.</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Finally block</div>
+          <div class="detail-value">1. Deregister temp service<br>2. Check relay state + voltage delta<br>3. delta &lt; 2V → auto-close relay<br>4. delta ≥ 2V → alarm, stay open<br>5. Restart aggregate driver if stopped</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">Alarm channels</div>
+          <div class="detail-value">Buzzer + VRM notification + D-Bus alarm flag + web UI banner</div>
+        </div>
+        <div class="detail-row">
+          <div class="detail-label">LFP safety</div>
+          <div class="detail-value">LFPs remain on Orion DC-DC (safe voltage) until relay is manually or auto-closed.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════════════ SVG DIAGRAM (injected) ═══════════════ -->
+<script>
+// ─── State definitions ───
+const STATES = [
+  {
+    id: 0, label: '0: Idle', x: 180, y: 68,
+    color: '#4caf50', stroke: '#2a6a30', grad: '#1a4a20',
+    desc: 'Checks every 60s'
+  },
+  {
+    id: 1, label: '1: Stopping Driver', x: 180, y: 198,
+    color: '#6ab0f5', stroke: '#2a5a8f', grad: '#102848',
+    desc: 'Register temp svc @ 28.4V, stop aggregate'
+  },
+  {
+    id: 2, label: '2: Disconnecting LFP', x: 180, y: 338,
+    color: '#6ab0f5', stroke: '#2a5a8f', grad: '#102848',
+    desc: 'Open relay, verify, raise CVL → 31.2V'
+  },
+  {
+    id: 3, label: '3: Equalising FLA', x: 180, y: 478,
+    color: '#ff9800', stroke: '#8a4e00', grad: '#6a3a00',
+    desc: 'Monitor I_trojan, 31.2V'
+  },
+  {
+    id: 4, label: '4: Cooling Down', x: 180, y: 618,
+    color: '#6ab0f5', stroke: '#2a5a8f', grad: '#102848',
+    desc: 'Reduce CVL → 27.6V'
+  },
+  {
+    id: 5, label: '5: Voltage Matching', x: 500, y: 618,
+    color: '#6ab0f5', stroke: '#2a5a8f', grad: '#102848',
+    desc: 'Wait |ΔV| < 1V'
+  },
+  {
+    id: 6, label: '6: Reconnecting LFP', x: 500, y: 478,
+    color: '#6ab0f5', stroke: '#2a5a8f', grad: '#102848',
+    desc: 'Close relay, verify, measure inrush'
+  },
+  {
+    id: 7, label: '7: Restarting Driver', x: 500, y: 338,
+    color: '#6ab0f5', stroke: '#2a5a8f', grad: '#102848',
+    desc: 'Deregister temp svc, restart aggregate'
+  },
+  {
+    id: 8, label: '8: Error', x: 500, y: 198,
+    color: '#f44336', stroke: '#7a1010', grad: '#5a0808',
+    desc: 'Finally: delta-aware relay close'
+  }
+];
+
+const W = 148, H = 46, R = 8;
+
+function buildMainSVG() {
+  const svg = document.getElementById('main-svg');
+  // Clear the placeholder content
+  while (svg.lastChild) svg.removeChild(svg.lastChild);
+
+  svg.setAttribute('viewBox', '0 0 760 740');
+
+  // Background
+  const bg = doc('rect', {width:760, height:740, fill:'#080f1a', rx:8});
+  svg.appendChild(bg);
+
+  // Grid
+  const defs = doc('defs');
+  const gridPat = doc('pattern', {id:'g', width:40, height:40, patternUnits:'userSpaceOnUse'});
+  gridPat.appendChild(doc('path', {d:'M 40 0 L 0 0 0 40', fill:'none', stroke:'#0f1e30', 'stroke-width':0.5}));
+  defs.appendChild(gridPat);
+  addArrow(defs, 'ab', '#4a7aaf');
+  addArrow(defs, 'ag', '#4caf50');
+  addArrow(defs, 'ao', '#ff9800');
+  addArrow(defs, 'ar', '#f44336');
+  addArrow(defs, 'am', '#888');
+  svg.appendChild(defs);
+  svg.appendChild(doc('rect', {width:760, height:740, fill:'url(#g)', rx:8}));
+
+  // ─── ARROWS ───
+  // Build arrows before nodes so nodes render on top
+  const arrowLayer = doc('g');
+  svg.appendChild(arrowLayer);
+  const nodeLayer = doc('g');
+  svg.appendChild(nodeLayer);
+
+  // 0 → 1
+  drawVArrow(arrowLayer, 180, 68+H/2, 198-H/2, 'ag',
+    ['conditions met OR RunNow', '(SoC ≥ 95% always enforced)'],
+    200, 0, ['#4caf50', '#3a7a40']);
+
+  // 1 → 2
+  drawVArrow(arrowLayer, 180, 198+H/2, 338-H/2, 'ab',
+    ['relay open + verified'],
+    200, 0, ['#4a7aaf']);
+
+  // 2 → 3
+  drawVArrow(arrowLayer, 180, 338+H/2, 478-H/2, 'ab',
+    ['raise CVL → 31.2V (after verify)'],
+    200, 0, ['#4a7aaf']);
+
+  // 3 → 4
+  drawVArrow(arrowLayer, 180, 478+H/2, 618-H/2, 'ao',
+    ['I < 8A  OR  2.5hr timeout', 'OR i_trojan=None for 5 min'],
+    200, 0, ['#ff9800', '#c07000']);
+
+  // 4 → 5  (horizontal right)
+  drawHArrow(arrowLayer, 180+W/2, 618, 500-W/2, 618, 'ab',
+    ['CVL → 27.6V (float)', 'wait |ΔV| < 1V'],
+    340, 618-30, ['#4a7aaf', '#3a6090']);
+
+  // 5 → 6  (up)
+  drawVArrow(arrowLayer, 500, 618-H/2, 478+H/2, 'ab',
+    ['delta < 1V'],
+    520, 0, ['#4a7aaf']);
+
+  // 6 → 7  (up)
+  drawVArrow(arrowLayer, 500, 478-H/2, 338+H/2, 'ab',
+    ['relay closed + verified', 'inrush measured'],
+    520, 0, ['#4a7aaf', '#3a6090']);
+
+  // 7 → 8 Error  (horizontal left — same y level, 8 is at y=198)
+  // Actually 7 and 8 are at the same y. Let's route it: 7(500,338) → 8(500,198)
+  // We'll put a curved arrow from 7 back up to near 0 to show the loop
+  // Loop: 7 → 0  (big curve on the left side)
+  drawLoopBack(arrowLayer);
+
+  // Error transitions from each state
+  // Each state → 8 Error  (dashed red arrows)
+  drawErrorArrows(arrowLayer);
+
+  // ─── NODES ───
+  STATES.forEach(s => {
+    const g = doc('g', {'class':'state-node', 'data-id':s.id});
+    g.setAttribute('cursor', 'pointer');
+
+    // Shadow
+    const shadow = doc('rect', {
+      x: s.x - W/2 + 3, y: s.y - H/2 + 3,
+      width: W, height: H, rx: R,
+      fill: '#000', opacity: 0.4
+    });
+    g.appendChild(shadow);
+
+    // Body
+    const body = doc('rect', {
+      x: s.x - W/2, y: s.y - H/2,
+      width: W, height: H, rx: R,
+      fill: s.grad,
+      stroke: s.stroke,
+      'stroke-width': 1.5
+    });
+    g.appendChild(body);
+
+    // Highlight bar at top
+    const bar = doc('rect', {
+      x: s.x - W/2 + R, y: s.y - H/2,
+      width: W - R*2, height: 3, rx: 1,
+      fill: s.color, opacity: 0.7
+    });
+    g.appendChild(bar);
+
+    // Label
+    const label = doc('text', {
+      x: s.x, y: s.y - 4,
+      'text-anchor': 'middle',
+      fill: '#e8f0ff',
+      'font-size': 12,
+      'font-weight': 700,
+      'font-family': 'Segoe UI, system-ui, sans-serif'
+    });
+    label.textContent = s.label;
+    g.appendChild(label);
+
+    // Sub-label
+    const sub = doc('text', {
+      x: s.x, y: s.y + 12,
+      'text-anchor': 'middle',
+      fill: s.color,
+      'font-size': 9,
+      'font-family': 'Segoe UI, system-ui, sans-serif'
+    });
+    sub.textContent = s.desc;
+    g.appendChild(sub);
+
+    g.addEventListener('click', () => selectState(s.id));
+    nodeLayer.appendChild(g);
+  });
+}
+
+function doc(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  if (attrs) Object.entries(attrs).forEach(([k,v]) => el.setAttribute(k, v));
+  return el;
+}
+
+function addArrow(defs, id, color) {
+  const m = doc('marker', {id, markerWidth:8, markerHeight:8, refX:6, refY:3, orient:'auto'});
+  m.appendChild(doc('path', {d:'M0,0 L0,6 L8,3 z', fill:color}));
+  defs.appendChild(m);
+}
+
+function drawVArrow(layer, cx, y1, y2, markerId, labels, labelX, labelXOffset, colors) {
+  const line = doc('line', {
+    x1:cx, y1:y1, x2:cx, y2:y2,
+    stroke: markerId==='ag'?'#4caf50':markerId==='ao'?'#ff9800':markerId==='ar'?'#f44336':'#4a7aaf',
+    'stroke-width': 1.5,
+    'marker-end': `url(#${markerId})`
+  });
+  layer.appendChild(line);
+
+  if (labels && labels.length) {
+    const midY = (y1 + y2) / 2;
+    labels.forEach((lbl, i) => {
+      const offset = (labels.length === 1) ? 0 : (i - (labels.length-1)/2) * 13;
+      const bg = doc('rect', {
+        x: labelX - W/2 + 4, y: midY + offset - 9,
+        width: W - 4, height: 12, rx: 3,
+        fill: '#060e18', opacity: 0.85
+      });
+      layer.appendChild(bg);
+      const t = doc('text', {
+        x: labelX + 4, y: midY + offset,
+        'text-anchor': 'middle',
+        fill: colors[i] || colors[0],
+        'font-size': 9,
+        'font-family': 'Segoe UI, system-ui, sans-serif'
+      });
+      t.textContent = lbl;
+      layer.appendChild(t);
+    });
+  }
+}
+
+function drawHArrow(layer, x1, y1, x2, y2, markerId, labels, lx, ly, colors) {
+  const line = doc('line', {
+    x1, y1, x2, y2,
+    stroke: '#4a7aaf',
+    'stroke-width': 1.5,
+    'marker-end': `url(#${markerId})`
+  });
+  layer.appendChild(line);
+
+  if (labels && labels.length) {
+    labels.forEach((lbl, i) => {
+      const offsetY = (labels.length === 1) ? 0 : (i - (labels.length-1)/2) * 13;
+      const textX = lx;
+      const textY = ly + offsetY + 10;
+      const bg = doc('rect', {
+        x: textX - 78, y: textY - 10,
+        width: 156, height: 13, rx: 3,
+        fill: '#060e18', opacity: 0.85
+      });
+      layer.appendChild(bg);
+      const t = doc('text', {
+        x: textX, y: textY,
+        'text-anchor': 'middle',
+        fill: colors[i] || colors[0],
+        'font-size': 9,
+        'font-family': 'Segoe UI, system-ui, sans-serif'
+      });
+      t.textContent = lbl;
+      layer.appendChild(t);
+    });
+  }
+}
+
+function drawLoopBack(layer) {
+  // Loop: state 7 (500,338) → state 0 (180,68)
+  // Route: from left side of 7, curve up-left to top of 0
+  const x7 = 500 - W/2, y7 = 338;
+  const x0 = 180, y0 = 68 - H/2;
+  // Path: left from state 7, then up, then right to state 0
+  const px = 60; // left margin for the path
+  const path = doc('path', {
+    d: `M ${x7} ${y7} L ${px} ${y7} L ${px} ${y0} L ${x0 - W/2} ${y0}`,
+    fill: 'none',
+    stroke: '#4caf50',
+    'stroke-width': 1.5,
+    'stroke-dasharray': '5,3',
+    'marker-end': 'url(#ag)'
+  });
+  layer.appendChild(path);
+
+  // Label
+  const lx = (px + x0 - W/2) / 2 + 14;
+  const ly = y0;
+  const bg = doc('rect', { x: lx - 70, y: ly - 22, width: 140, height: 13, rx:3, fill:'#060e18', opacity:0.85 });
+  layer.appendChild(bg);
+  const t = doc('text', {
+    x: lx, y: ly - 12,
+    'text-anchor': 'middle',
+    fill: '#4caf50',
+    'font-size': 9,
+    'font-family': 'Segoe UI, system-ui, sans-serif'
+  });
+  t.textContent = 'deregister temp svc, record timestamp → Idle';
+  layer.appendChild(t);
+}
+
+function drawErrorArrows(layer) {
+  // Draw dashed red lines from states 1-7 to state 8 (500, 198)
+  const errorX = 500, errorY = 198;
+
+  // From states on left column (0-4): route right to error
+  // We'll draw a vertical dashed bar on the right side, from each left-col state
+  // Actually, let's draw a shared "any state" arrow with a note
+
+  // Draw a dashed red vertical line on the right side
+  const rx2 = 680;
+  const topY = 68;
+  const botY = 618 + H/2;
+
+  // Right-side collection bar
+  const bar = doc('line', {
+    x1: rx2, y1: topY, x2: rx2, y2: botY,
+    stroke: '#c62828', 'stroke-width': 1, 'stroke-dasharray': '4,3', opacity: 0.4
+  });
+  layer.appendChild(bar);
+
+  // Horizontal tap from each left-col state to the bar
+  [68, 198, 338, 478, 618].forEach(stateY => {
+    const tap = doc('line', {
+      x1: 180 + W/2, y1: stateY,
+      x2: rx2, y2: stateY,
+      stroke: '#c62828', 'stroke-width': 1, 'stroke-dasharray': '4,3', opacity: 0.3
+    });
+    layer.appendChild(tap);
+  });
+
+  // Horizontal tap from right-col states (5-7)
+  [618, 478, 338].forEach(stateY => {
+    const tap = doc('line', {
+      x1: 500 + W/2, y1: stateY,
+      x2: rx2, y2: stateY,
+      stroke: '#c62828', 'stroke-width': 1, 'stroke-dasharray': '4,3', opacity: 0.3
+    });
+    layer.appendChild(tap);
+  });
+
+  // Arrow from bar to Error state
+  const arrow = doc('line', {
+    x1: rx2, y1: 198,
+    x2: 500 + W/2, y2: 198,
+    stroke: '#f44336', 'stroke-width': 1.5,
+    'marker-end': 'url(#ar)'
+  });
+  layer.appendChild(arrow);
+
+  // Label
+  const bg = doc('rect', { x: rx2 - 56, y: 300 - 10, width: 112, height: 22, rx:3, fill:'#060e18', opacity:0.9 });
+  layer.appendChild(bg);
+  const t1 = doc('text', {
+    x: rx2, y: 308,
+    'text-anchor': 'middle',
+    fill: '#f44336',
+    'font-size': 9,
+    'font-weight': 700,
+    'font-family': 'Segoe UI, system-ui, sans-serif'
+  });
+  t1.textContent = 'Any state → Error';
+  layer.appendChild(t1);
+  const t2 = doc('text', {
+    x: rx2, y: 320,
+    'text-anchor': 'middle',
+    fill: '#8a2020',
+    'font-size': 9,
+    'font-family': 'Segoe UI, system-ui, sans-serif'
+  });
+  t2.textContent = 'on failure';
+  layer.appendChild(t2);
+}
+
+// ─── Tab switching ───
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => {
+    const names = ['main','timeline','cvl','startup','guards'];
+    t.classList.toggle('active', names[i] === name);
+  });
+  document.querySelectorAll('.tab-content').forEach(c => {
+    c.classList.toggle('active', c.id === 'tab-' + name);
+  });
+}
+
+// ─── State selection ───
+let selectedId = null;
+
+function selectState(id) {
+  // Deselect previous
+  document.querySelectorAll('.state-node').forEach(n => n.classList.remove('selected'));
+  // Select new
+  const node = document.querySelector(`.state-node[data-id="${id}"]`);
+  if (node) node.classList.add('selected');
+
+  // Update detail panel
+  document.getElementById('detail-placeholder').style.display = 'none';
+  document.querySelectorAll('.detail-card').forEach(c => c.classList.remove('active'));
+  const card = document.getElementById('detail-' + id);
+  if (card) card.classList.add('active');
+
+  selectedId = id;
+}
+
+// ─── Build on load ───
+document.addEventListener('DOMContentLoaded', () => {
+  buildMainSVG();
+});
+</script>
+
+</body>
+</html>
