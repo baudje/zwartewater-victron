@@ -29,6 +29,7 @@ from dbus_status_service import (
 )
 from settings import Settings
 from alerting import raise_alarm, clear_alarm
+from web_server import start_web_server
 
 # Logging setup
 LOG_FILE = "/data/log/fla-equalisation.log"
@@ -370,6 +371,9 @@ def main():
 
     try:
         service = FlaEqualisationService()
+
+        # Start web UI
+        start_web_server()
 
         # Schedule periodic checks
         GLib.timeout_add_seconds(CHECK_INTERVAL_SEC, service._check)

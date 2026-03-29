@@ -25,6 +25,7 @@ cp "${SCRIPT_DIR}/dbus_monitor.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/dbus_status_service.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/settings.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/alerting.py" "${INSTALL_DIR}/"
+cp "${SCRIPT_DIR}/web_server.py" "${INSTALL_DIR}/"
 
 # Copy service/run
 cp "${SCRIPT_DIR}/service/run" "${SERVICE_DIR}/run"
