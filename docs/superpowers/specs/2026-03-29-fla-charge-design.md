@@ -29,7 +29,7 @@ Extract common safety-critical code from the FLA equalisation service into share
 - Contains: service name, start timestamp, current phase
 - Both services check lock before starting any operation
 - Released in `finally` block
-- If equalisation ran within last 7 days, charge service skips (equalisation at 31.2V already fully charges Trojans)
+- Both services check lock before starting; whoever acquires first runs
 
 ---
 
@@ -40,9 +40,8 @@ All must be true:
 2. **No operation lock held** (equalisation not running)
 3. **AC input available** (AC-in-1 shore power OR AC-in-2 generator active)
 4. **Trojan SoC < 85%** (configurable, from SmartShunt Trojan 279)
-5. **No recent equalisation** (within 7 days — equalisation already fully charges FLAs)
 
-Checked every 60 seconds.
+Checked every 60 seconds. No calendar-based skip — if the Trojans discharge shortly after an equalisation, they still need charging. The SoC trigger is the ground truth.
 
 ---
 
@@ -124,7 +123,6 @@ Additional guards for the charge service:
 |---|---|---|
 | AC loss during Phase 2-3 | Quattro not charging or Trojan current drops to ~0A | Skip to Phase 4 (voltage match + reconnect) |
 | Phase 1 timeout | 8 hours without transition trigger | Abort, no cleanup needed |
-| Equalisation ran recently | Within 7 days | Skip — Trojans already fully charged |
 | Lock held | Other service operating | Wait for next check cycle |
 
 ---
@@ -215,7 +213,7 @@ Same pattern as equalisation dashboard:
 | Scenario | Behaviour |
 |---|---|
 | Both want to run | Lock prevents simultaneous execution. First wins, other waits. |
-| Equalisation ran recently (< 7 days) | Charge service skips — equalisation at 31.2V already fully charged FLAs |
+| Equalisation just ran | If Trojans are above 85% SoC, charge service won't trigger (SoC is the ground truth) |
 | Charge ran recently but equalisation is due | Equalisation runs normally — higher voltage serves a different purpose |
 | Crash during either service | Startup safety check (shared relay_control) recovers relay state |
 
