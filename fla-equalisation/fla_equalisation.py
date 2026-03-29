@@ -117,6 +117,7 @@ def run_equalisation(settings, monitor, status):
     temp_service = None
     aggregate_stopped = False
     original_dvcc_voltage = None
+    original_battery_service = None
 
     try:
         # Step 1: Register temporary battery service at SAFE voltage first
@@ -136,15 +137,11 @@ def run_equalisation(settings, monitor, status):
             return False
         aggregate_stopped = True
 
-        # Wait for DVCC to discover our temp service as the active battery
-        for _ in range(30):
-            active = monitor._get_active_battery_service()
-            if active and "fla_equalisation" in str(active):
-                log.info("DVCC discovered temp battery service: %s", active)
-                break
-            time.sleep(1)
-        else:
-            log.warning("DVCC did not discover temp service after 30s — proceeding anyway")
+        # Switch DVCC to our temp battery service
+        original_battery_service = monitor.get_battery_service_setting()
+        log.info("Saving BatteryService setting: %s", original_battery_service)
+        monitor.set_battery_service_setting("com.victronenergy.battery/100")
+        time.sleep(5)  # Let DVCC switch
 
         # Step 3: Open relay 2 (disconnect LFP direct path)
         status.update(state=STATE_DISCONNECTING)
@@ -290,7 +287,14 @@ def run_equalisation(settings, monitor, status):
         return False
 
     finally:
-        # Restore DVCC MaxChargeVoltage before anything else
+        # Restore DVCC settings before anything else
+        if original_battery_service is not None:
+            try:
+                monitor.set_battery_service_setting(original_battery_service)
+                log.info("BatteryService restored to %s", original_battery_service)
+            except Exception:
+                log.error("CRITICAL: Failed to restore BatteryService setting")
+
         if original_dvcc_voltage is not None:
             try:
                 monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)

@@ -159,6 +159,28 @@ class DbusMonitor:
         """Read Cerbo relay 2 state. Returns 0 (open) or 1 (closed), or None."""
         return _get_dbus_value(self.bus, SYSTEM_SERVICE, RELAY_STATE_PATH)
 
+    def get_battery_service_setting(self):
+        """Read the Venus OS BatteryService setting (which battery DVCC uses)."""
+        return _get_dbus_value(
+            self.bus, "com.victronenergy.settings",
+            "/Settings/SystemSetup/BatteryService",
+        )
+
+    def set_battery_service_setting(self, value):
+        """Set the Venus OS BatteryService setting. Returns True on success."""
+        try:
+            obj = self.bus.get_object(
+                "com.victronenergy.settings",
+                "/Settings/SystemSetup/BatteryService",
+            )
+            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+            iface.SetValue(str(value))
+            log.info("BatteryService set to %s", value)
+            return True
+        except dbus.exceptions.DBusException as e:
+            log.error("Failed to set BatteryService: %s", e)
+            return False
+
     def _get_active_battery_service(self):
         """Read the active battery service from DVCC."""
         return _get_dbus_value(
