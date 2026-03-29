@@ -108,6 +108,10 @@ HTML_PAGE = """<!DOCTYPE html>
   <span id="run_msg" style="margin-left: 8px; color: #8899aa; font-size:0.85em;"></span>
 </div>
 
+<div class="card" style="text-align:center">
+  <a href="http://venus.local:8089" style="color:#8bb4d9; text-decoration:none">FLA Charge Service →</a>
+</div>
+
 <div class="updated" id="updated"></div>
 
 <script>
