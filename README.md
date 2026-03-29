@@ -84,7 +84,25 @@ Standalone Python service for automated Trojan L16H-AC equalisation. Runs as a p
 - [dbus-serialbattery](https://github.com/Louisvdw/dbus-serialbattery) installed
 - [dbus-aggregate-batteries](https://github.com/Dr-Gigavolt/dbus-aggregate-batteries) installed
 
-### Deploy Configs
+### Quick Start (from Cerbo shell)
+
+```bash
+# 1. Install FLA equalisation service
+wget -qO- https://raw.githubusercontent.com/baudje/zwartewater-victron/main/fla-equalisation/install-remote.sh | bash
+
+# 2. Install aggregate battery config
+wget -qO /data/apps/dbus-aggregate-batteries/config.ini https://raw.githubusercontent.com/baudje/zwartewater-victron/main/config/config.ini
+/data/apps/dbus-aggregate-batteries/restart.sh
+
+# 3. Install serial battery config
+wget -qO /data/apps/dbus-serialbattery/config.ini https://raw.githubusercontent.com/baudje/zwartewater-victron/main/config/sb-config.ini
+svc -d /service/dbus-serialbattery.*; sleep 3; svc -u /service/dbus-serialbattery.*
+
+# 4. Open web dashboard to configure settings
+# http://venus.local:8088
+```
+
+### Alternative: Deploy via SCP (from local machine)
 
 ```bash
 # Aggregate battery config
@@ -98,11 +116,16 @@ ssh root@venus.local 'svc -d /service/dbus-serialbattery.*; sleep 3; svc -u /ser
 
 ### Deploy FLA Equalisation Service
 
-```bash
-# Copy files to Cerbo
-scp -r fla-equalisation/ root@venus.local:/tmp/fla-equalisation/
+**One-liner install (from Cerbo shell):**
 
-# Run installer
+```bash
+wget -qO- https://raw.githubusercontent.com/baudje/zwartewater-victron/main/fla-equalisation/install-remote.sh | bash
+```
+
+**Or manually via SCP:**
+
+```bash
+scp -r fla-equalisation/ root@venus.local:/tmp/fla-equalisation/
 ssh root@venus.local 'bash /tmp/fla-equalisation/install.sh'
 ```
 
