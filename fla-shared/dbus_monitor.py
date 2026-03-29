@@ -122,6 +122,29 @@ class DbusMonitor:
         soc = _get_dbus_value(self.bus, self._trojan_service, "/Soc")
         return float(soc) if soc is not None else None
 
+    def get_battery_temperature(self):
+        """Read battery temperature from serialbattery (JK BMS).
+
+        Returns the average of both BMS readings, or a single reading if only
+        one is available. Used for Trojan FLA temperature compensation — the LFP
+        cells are in the same engine room as the FLA bank.
+        """
+        temps = []
+        for name in self.bus.list_names():
+            name = str(name)
+            if "com.victronenergy.battery" not in name:
+                continue
+            if "aggregate" in name or "fla" in name:
+                continue
+            product = _get_dbus_value(self.bus, name, "/ProductName")
+            if product and "SerialBattery" in str(product):
+                temp = _get_dbus_value(self.bus, name, "/Dc/0/Temperature")
+                if temp is not None:
+                    temps.append(float(temp))
+        if not temps:
+            return None
+        return sum(temps) / len(temps)
+
     def get_lfp_soc(self):
         """Read LFP SoC from aggregate battery driver or serialbattery."""
         # Try aggregate driver first
@@ -180,12 +203,6 @@ class DbusMonitor:
         except dbus.exceptions.DBusException as e:
             log.error("Failed to set BatteryService: %s", e)
             return False
-
-    def _get_active_battery_service(self):
-        """Read the active battery service from DVCC."""
-        return _get_dbus_value(
-            self.bus, "com.victronenergy.system", "/ActiveBatteryService",
-        )
 
     def get_dvcc_max_charge_voltage(self):
         """Read the DVCC system MaxChargeVoltage setting."""

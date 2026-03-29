@@ -54,6 +54,7 @@ for f in \
     alerting.py \
     temp_battery.py \
     temp_battery_process.py \
+    temp_compensation.py \
 ; do
     wget -qO "${SHARED_DIR}/${f}" "${SHARED_URL}/${f}"
     echo "  ${f}"

@@ -22,12 +22,13 @@ from gi.repository import GLib
 from dbus_monitor import DbusMonitor
 from temp_battery import TempBatteryService
 from relay_control import (
-    open_relay, verify_relay_open, close_relay_verified,
-    close_relay_delta_aware, startup_safety_check,
+    open_relay, verify_relay_open, verify_relay_still_open,
+    close_relay_verified, close_relay_delta_aware, startup_safety_check,
 )
 from voltage_matching import wait_for_match
 from aggregate_driver import stop as stop_aggregate, start as start_aggregate
 from lock import acquire as acquire_lock, release as release_lock
+from temp_compensation import compensate as temp_compensate
 import alerting
 
 from dbus_status_service import (
@@ -116,12 +117,12 @@ def should_run(settings, monitor):
     if not settings.enabled:
         return False
 
+    trojan_soc = monitor.get_trojan_soc()
     run_now_flag = settings.run_now
     if run_now_flag:
         log.info("RunNow flag set — bypassing SoC trigger (AC still enforced)")
         settings.clear_run_now()
     else:
-        trojan_soc = monitor.get_trojan_soc()
         if trojan_soc is None:
             log.warning("Cannot read Trojan SoC")
             return False
@@ -132,7 +133,6 @@ def should_run(settings, monitor):
         log.debug("No AC input available")
         return False
 
-    trojan_soc = monitor.get_trojan_soc()
     log.info("FLA charge conditions met: Trojan SoC=%.1f%%, AC available", trojan_soc or 0)
     return True
 
@@ -245,15 +245,19 @@ def run_charge(settings, monitor, status):
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
 
         # Raise DVCC system limit and CVL — LFPs are disconnected, safe
+        battery_temp = monitor.get_battery_temperature()
+        abs_voltage = temp_compensate(settings.fla_bulk_voltage, battery_temp)
         original_dvcc_voltage = monitor.get_dvcc_max_charge_voltage()
         log.info("Saving DVCC MaxChargeVoltage: %.1fV", original_dvcc_voltage or 0)
-        monitor.set_dvcc_max_charge_voltage(settings.fla_bulk_voltage + 0.5)
-        temp_service.set_charge_voltage(settings.fla_bulk_voltage)
-        log.info("CVL raised to FLA bulk voltage: %.2fV", settings.fla_bulk_voltage)
+        monitor.set_dvcc_max_charge_voltage(abs_voltage + 0.5)
+        temp_service.set_charge_voltage(abs_voltage)
+        log.info("CVL raised to FLA bulk voltage: %.2fV (base %.2fV, temp %s)",
+                 abs_voltage, settings.fla_bulk_voltage,
+                 "%.1f°C" % battery_temp if battery_temp is not None else "N/A")
 
         # === PHASE 3: FLA absorption ===
         status.update(state=STATE_PHASE2_BULK)
-        log.info("Phase 2-3: FLA bulk/absorption at %.2fV", settings.fla_bulk_voltage)
+        log.info("Phase 2-3: FLA bulk/absorption at %.2fV", abs_voltage)
         abs_start = time.time()
         abs_timeout = settings.fla_absorption_max_hours * 3600
         i_trojan_none_count = 0
@@ -288,6 +292,12 @@ def run_charge(settings, monitor, status):
                 alerting.raise_alarm("SmartShunt Trojan unresponsive during absorption", status_service=status)
                 return False
 
+            # Verify relay still open — external close at 29.64V would damage LFPs
+            if not verify_relay_still_open(monitor, settings.fla_bulk_voltage):
+                status.update(state=STATE_ERROR)
+                alerting.raise_alarm("Relay closed externally during absorption — aborting", status_service=status)
+                return False
+
             # Orion failure detection
             if (lfp_voltage_at_disconnect is not None and v_lfp is not None
                     and v_lfp < lfp_voltage_at_disconnect - 0.5):
@@ -313,10 +323,10 @@ def run_charge(settings, monitor, status):
                 log.warning("High Trojan charge current: %.1fA (dynamo/MPPT?)", abs(i_trojan))
 
             # Absorption complete — only after voltage reaches the target
-            voltage_reached = v_trojan is not None and v_trojan >= settings.fla_bulk_voltage
+            voltage_reached = v_trojan is not None and v_trojan >= (abs_voltage - 0.1)
             if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.fla_absorption_complete_current:
                 log.info("Absorption complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
-                         v_trojan, settings.fla_bulk_voltage, abs(i_trojan),
+                         v_trojan, abs_voltage, abs(i_trojan),
                          settings.fla_absorption_complete_current, elapsed / 60)
                 break
 
@@ -340,7 +350,7 @@ def run_charge(settings, monitor, status):
             monitor, temp_service, status, alerting,
             voltage_delta_max=settings.voltage_delta_max,
             timeout_hours=settings.voltage_match_timeout_hours,
-            float_voltage=settings.fla_float_voltage,
+            float_voltage=temp_compensate(settings.fla_float_voltage, battery_temp),
             cache_callback=_vm_cache_cb,
         )
         if not matched:
@@ -400,11 +410,11 @@ def run_charge(settings, monitor, status):
 
         if temp_service is not None:
             try: temp_service.deregister()
-            except: pass
+            except Exception: pass
         close_relay_delta_aware(monitor, alerting, status)
         if aggregate_stopped:
             try: start_aggregate()
-            except: log.error("CRITICAL: Failed to restart aggregate driver")
+            except Exception: log.error("CRITICAL: Failed to restart aggregate driver")
         release_lock()
 
 
