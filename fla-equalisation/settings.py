@@ -48,7 +48,7 @@ class Settings:
                 self._settings_service, "/Settings"
             )
             settings_iface = dbus.Interface(
-                settings_obj, "com.victronenergy.BusItem"
+                settings_obj, "com.victronenergy.Settings"
             )
         except dbus.exceptions.DBusException:
             log.error("com.victronenergy.settings not available")
