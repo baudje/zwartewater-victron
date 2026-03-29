@@ -18,17 +18,18 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"
 from vedbus import VeDbusService
 
 
-def get_bus():
+def get_private_bus():
+    """Get a private (non-shared) bus connection to avoid path conflicts."""
     if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
-        return dbus.SessionBus()
-    return dbus.SystemBus()
+        return dbus.SessionBus(private=True)
+    return dbus.SystemBus(private=True)
 
 
 class TempBatteryService:
     """Temporary D-Bus battery service for DVCC control during equalisation."""
 
     def __init__(self, device_instance=100):
-        self._bus = get_bus()
+        self._bus = get_private_bus()
         self._service = VeDbusService(
             "com.victronenergy.battery.fla_equalisation",
             self._bus,
