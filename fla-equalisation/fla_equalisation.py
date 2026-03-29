@@ -133,12 +133,12 @@ def run_equalisation(settings, monitor, status):
     aggregate_stopped = False
 
     try:
-        # Step 1: Register temporary battery service (before stopping aggregate
-        # so DVCC always has a battery service — instance 100 coexists with
-        # aggregate instance 99 until it disappears)
+        # Step 1: Register temporary battery service at SAFE voltage first
+        # (not equalisation voltage — protect LFPs if crash before relay opens)
+        # Instance 100 coexists with aggregate instance 99 until it disappears
         temp_service = TempBatteryService(device_instance=100)
         temp_service.register(
-            charge_voltage=settings.eq_voltage,
+            charge_voltage=28.4,  # Safe LFP voltage — raised to EQ after relay opens
             charge_current=120.0,
             discharge_current=0,
         )
@@ -175,7 +175,11 @@ def run_equalisation(settings, monitor, status):
         if lfp_voltage_at_disconnect is not None:
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
 
-        # Step 5: Equalisation — monitor Trojan current
+        # Step 5: NOW safe to raise CVL to equalisation voltage — LFPs are disconnected
+        temp_service.set_charge_voltage(settings.eq_voltage)
+        log.info("CVL raised to equalisation voltage: %.1fV", settings.eq_voltage)
+
+        # Step 6: Equalisation — monitor Trojan current
         status.update(state=STATE_EQUALISING)
         log.info("Starting equalisation at %.1fV", settings.eq_voltage)
         eq_start = time.time()
