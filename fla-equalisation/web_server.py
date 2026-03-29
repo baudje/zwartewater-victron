@@ -42,7 +42,12 @@ HTML_PAGE = """<!DOCTYPE html>
   .btn:active { background: #0d1b2a; }
   .btn.danger { border-color: #ef4035; color: #ef4035; }
   .btn.danger:hover { background: #2a1515; }
+  .btn.small { padding: 4px 12px; font-size: 0.85em; margin-left: 8px; }
   .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; }
+  input.setting-input { background: #0d1b2a; border: 1px solid #2a4a7a; color: #f0f4fc;
+    padding: 4px 8px; border-radius: 4px; width: 70px; font-size: 0.95em; text-align: right; }
+  input.setting-input:focus { border-color: #4a8ad9; outline: none; }
+  .save-ok { color: #4caf50; font-size: 0.85em; margin-left: 6px; }
   .updated { color: #556677; font-size: 0.8em; margin-top: 12px; text-align: center; }
 </style>
 </head>
@@ -66,17 +71,16 @@ HTML_PAGE = """<!DOCTYPE html>
 
 <div class="card">
   <h2>Settings</h2>
-  <div class="settings-grid">
-    <div class="row"><span class="label">Equalisation voltage</span><span class="value" id="s_eqv">—</span></div>
-    <div class="row"><span class="label">Completion current</span><span class="value" id="s_eqi">—</span></div>
-    <div class="row"><span class="label">Timeout</span><span class="value" id="s_timeout">—</span></div>
-    <div class="row"><span class="label">Float voltage</span><span class="value" id="s_float">—</span></div>
-    <div class="row"><span class="label">Max delta for reconnect</span><span class="value" id="s_delta">—</span></div>
-    <div class="row"><span class="label">Interval</span><span class="value" id="s_days">—</span></div>
-    <div class="row"><span class="label">Time window</span><span class="value" id="s_window">—</span></div>
-    <div class="row"><span class="label">Min LFP SoC</span><span class="value" id="s_soc">—</span></div>
-    <div class="row"><span class="label">Enabled</span><span class="value" id="s_enabled">—</span></div>
-  </div>
+  <div class="row"><span class="label">Equalisation voltage</span><span class="value"><input class="setting-input" id="s_eqv" data-key="eq_voltage" data-type="f"> V<span class="save-ok" id="ok_eq_voltage"></span></span></div>
+  <div class="row"><span class="label">Completion current</span><span class="value"><input class="setting-input" id="s_eqi" data-key="eq_current_complete" data-type="f"> A<span class="save-ok" id="ok_eq_current_complete"></span></span></div>
+  <div class="row"><span class="label">Max duration</span><span class="value"><input class="setting-input" id="s_timeout" data-key="eq_timeout_hours" data-type="f"> hrs<span class="save-ok" id="ok_eq_timeout_hours"></span></span></div>
+  <div class="row"><span class="label">Float voltage</span><span class="value"><input class="setting-input" id="s_float" data-key="float_voltage" data-type="f"> V<span class="save-ok" id="ok_float_voltage"></span></span></div>
+  <div class="row"><span class="label">Max delta for reconnect</span><span class="value"><input class="setting-input" id="s_delta" data-key="voltage_delta_max" data-type="f"> V<span class="save-ok" id="ok_voltage_delta_max"></span></span></div>
+  <div class="row"><span class="label">Interval</span><span class="value"><input class="setting-input" id="s_days" data-key="days_between" data-type="i"> days<span class="save-ok" id="ok_days_between"></span></span></div>
+  <div class="row"><span class="label">Start hour</span><span class="value"><input class="setting-input" id="s_start" data-key="start_hour" data-type="i"> :00<span class="save-ok" id="ok_start_hour"></span></span></div>
+  <div class="row"><span class="label">End hour</span><span class="value"><input class="setting-input" id="s_end" data-key="end_hour" data-type="i"> :00<span class="save-ok" id="ok_end_hour"></span></span></div>
+  <div class="row"><span class="label">Min LFP SoC</span><span class="value"><input class="setting-input" id="s_soc" data-key="lfp_soc_min" data-type="i"> %<span class="save-ok" id="ok_lfp_soc_min"></span></span></div>
+  <div class="row"><span class="label">Enabled</span><span class="value"><select class="setting-input" id="s_enabled" data-key="enabled" data-type="i" style="width:80px"><option value="1">Yes</option><option value="0">No</option></select><span class="save-ok" id="ok_enabled"></span></span></div>
 </div>
 
 <div class="card">
@@ -110,6 +114,35 @@ function fmtTime(s) {
   return m + "m " + Math.floor(s % 60) + "s";
 }
 
+var initialLoad = true;
+function setInput(id, val) {
+  var el = document.getElementById(id);
+  if (el && (initialLoad || document.activeElement !== el)) {
+    el.value = val != null ? val : "";
+  }
+}
+
+function saveSetting(key, value, type) {
+  var v = type === "i" ? parseInt(value) : parseFloat(value);
+  if (isNaN(v)) return;
+  fetch("/api/setting", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({key: key, value: v})
+  }).then(r => r.json()).then(d => {
+    var ok = document.getElementById("ok_" + key);
+    if (ok) { ok.textContent = "saved"; setTimeout(function(){ ok.textContent = ""; }, 2000); }
+  });
+}
+
+// Attach change handlers to all setting inputs
+document.addEventListener("DOMContentLoaded", function() {
+  document.querySelectorAll(".setting-input").forEach(function(el) {
+    el.addEventListener("change", function() {
+      saveSetting(el.dataset.key, el.value, el.dataset.type);
+    });
+  });
+});
+
 function refresh() {
   fetch("/api/status").then(r => r.json()).then(d => {
     var el = document.getElementById("state");
@@ -121,15 +154,17 @@ function refresh() {
     document.getElementById("vtrojan").textContent = fmt(d.trojan_voltage, "V");
     document.getElementById("vlfp").textContent = fmt(d.lfp_voltage, "V");
     document.getElementById("delta").textContent = fmt(d.voltage_delta, "V");
-    document.getElementById("s_eqv").textContent = fmt(d.settings.eq_voltage, "V", 1);
-    document.getElementById("s_eqi").textContent = fmt(d.settings.eq_current_complete, "A", 0);
-    document.getElementById("s_timeout").textContent = d.settings.eq_timeout_hours + " hrs";
-    document.getElementById("s_float").textContent = fmt(d.settings.float_voltage, "V", 1);
-    document.getElementById("s_delta").textContent = fmt(d.settings.voltage_delta_max, "V", 1);
-    document.getElementById("s_days").textContent = d.settings.days_between + " days";
-    document.getElementById("s_window").textContent = d.settings.start_hour + ":00 — " + d.settings.end_hour + ":00";
-    document.getElementById("s_soc").textContent = d.settings.lfp_soc_min + "%";
-    document.getElementById("s_enabled").textContent = d.settings.enabled ? "Yes" : "No";
+    setInput("s_eqv", d.settings.eq_voltage);
+    setInput("s_eqi", d.settings.eq_current_complete);
+    setInput("s_timeout", d.settings.eq_timeout_hours);
+    setInput("s_float", d.settings.float_voltage);
+    setInput("s_delta", d.settings.voltage_delta_max);
+    setInput("s_days", d.settings.days_between);
+    setInput("s_start", d.settings.start_hour);
+    setInput("s_end", d.settings.end_hour);
+    setInput("s_soc", d.settings.lfp_soc_min);
+    var sel = document.getElementById("s_enabled");
+    sel.value = d.settings.enabled ? "1" : "0";
     document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
   }).catch(e => {
     document.getElementById("updated").textContent = "Error: " + e;
@@ -145,6 +180,7 @@ function runNow() {
 }
 
 refresh();
+initialLoad = false;
 setInterval(refresh, 5000);
 </script>
 </body>
@@ -254,6 +290,40 @@ class RequestHandler(BaseHTTPRequestHandler):
                 msg = {"message": "RunNow flag set — equalisation will start at next check (SoC must be >= 95%)"}
             except Exception as e:
                 msg = {"message": "Error: %s" % e}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(msg).encode())
+        elif self.path == "/api/setting":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                data = json.loads(body)
+                key = data["key"]
+                value = data["value"]
+                # Map key to D-Bus path
+                key_to_path = {
+                    "eq_voltage": "EqualisationVoltage",
+                    "eq_current_complete": "EqualisationCurrentComplete",
+                    "eq_timeout_hours": "EqualisationTimeoutHours",
+                    "float_voltage": "FloatVoltage",
+                    "voltage_delta_max": "VoltageDeltaMax",
+                    "days_between": "DaysBetweenEqualisation",
+                    "start_hour": "AfternoonStartHour",
+                    "end_hour": "AfternoonEndHour",
+                    "lfp_soc_min": "LfpSocMin",
+                    "enabled": "Enabled",
+                }
+                if key not in key_to_path:
+                    raise ValueError("Unknown setting: %s" % key)
+                path = "/Settings/FlaEqualisation/" + key_to_path[key]
+                bus = dbus.SystemBus()
+                obj = bus.get_object("com.victronenergy.settings", path)
+                iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+                iface.SetValue(value)
+                msg = {"ok": True, "key": key, "value": value}
+            except Exception as e:
+                msg = {"ok": False, "error": str(e)}
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
