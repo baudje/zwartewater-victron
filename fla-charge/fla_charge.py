@@ -108,22 +108,25 @@ def get_max_lfp_cell_voltage(monitor):
 
 
 def should_run(settings, monitor):
-    """Check if FLA charge conditions are met."""
+    """Check if FLA charge conditions are met.
+
+    RunNow bypasses the SoC trigger (intentional — allows manual charge at any SoC).
+    AC input is always enforced, even on RunNow.
+    """
     if not settings.enabled:
         return False
 
-    if settings.run_now:
-        log.info("RunNow flag set — bypassing schedule checks (AC still enforced)")
+    run_now_flag = settings.run_now
+    if run_now_flag:
+        log.info("RunNow flag set — bypassing SoC trigger (AC still enforced)")
         settings.clear_run_now()
-        # Still check AC and lock below
-
-    elif monitor.get_trojan_soc() is not None:
+    else:
         trojan_soc = monitor.get_trojan_soc()
+        if trojan_soc is None:
+            log.warning("Cannot read Trojan SoC")
+            return False
         if trojan_soc >= settings.trojan_soc_trigger:
             return False
-    else:
-        log.warning("Cannot read Trojan SoC")
-        return False
 
     if not is_ac_available(monitor):
         log.debug("No AC input available")
@@ -266,11 +269,18 @@ def run_charge(settings, monitor, status):
             if v_trojan is not None and i_trojan is not None:
                 temp_service.update_voltage_current(v_trojan, i_trojan)
 
+            current_state = STATE_PHASE3_ABSORPTION if elapsed > 300 else STATE_PHASE2_BULK
+            delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan and v_lfp) else None
             status.update(
-                state=STATE_PHASE3_ABSORPTION if elapsed > 300 else STATE_PHASE2_BULK,
+                state=current_state,
                 time_remaining=remaining,
                 trojan_v=v_trojan, trojan_i=i_trojan,
                 lfp_v=v_lfp,
+            )
+            update_cache(
+                state=current_state, time_remaining=remaining,
+                trojan_v=v_trojan, lfp_v=v_lfp, voltage_delta=delta,
+                trojan_current=i_trojan,
             )
 
             if v_trojan is None:
@@ -322,11 +332,16 @@ def run_charge(settings, monitor, status):
 
         # === PHASE 4: Voltage matching + reconnect ===
         status.update(state=STATE_VOLTAGE_MATCHING)
+        update_cache(state=STATE_VOLTAGE_MATCHING)
+        def _vm_cache_cb(**kwargs):
+            update_cache(state=STATE_VOLTAGE_MATCHING, **kwargs)
+
         matched, delta = wait_for_match(
             monitor, temp_service, status, alerting,
             voltage_delta_max=settings.voltage_delta_max,
             timeout_hours=settings.voltage_match_timeout_hours,
             float_voltage=settings.fla_float_voltage,
+            cache_callback=_vm_cache_cb,
         )
         if not matched:
             return False

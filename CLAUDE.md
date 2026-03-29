@@ -2,10 +2,11 @@
 
 ## What This Is
 
-Victron Energy system optimisation for vessel Zwartewater (ENI: 03330190). Two deliverables:
+Victron Energy system optimisation for vessel Zwartewater (ENI: 03330190). Three deliverables:
 
 1. **config/** — Optimised `config.ini` for dbus-aggregate-batteries (2x EVE MB31 8s LFP + JK BMS)
-2. **fla-equalisation/** — Standalone Python script for automated Trojan L16H-AC equalisation on Venus OS
+2. **fla-equalisation/** — Automated Trojan L16H-AC equalisation service on Venus OS (port 8088)
+3. **fla-charge/** — Automated Trojan FLA bulk+absorption charge service on Venus OS (port 8089)
 
 ## System Overview
 
@@ -23,9 +24,11 @@ Victron Energy system optimisation for vessel Zwartewater (ENI: 03330190). Two d
 
 - JK BMS current is inaccurate → use `CURRENT_FROM_VICTRON = True` with SmartShunt LFP
 - Daily charge at 3.55V/cell, balancing at 3.60V/cell every 14 days
-- FLA equalisation at 31.2V every 90 days, requires stopping aggregate driver and registering temporary D-Bus battery service
-- Voltage matching (delta < 1V) required before reconnecting LFP bank
-- All equalisation settings exposed via Venus OS D-Bus settings (GUI v2 compatible)
+- FLA equalisation at 31.5V every 90 days (Trojan datasheet: 32.4V, capped for safety), CCL 60A
+- FLA absorption at 29.64V when Trojan SoC < 85% (Trojan datasheet: 2.47V/cell × 12), CCL 60A
+- Both require stopping aggregate driver and registering temporary D-Bus battery service
+- Voltage matching (delta < 1V) required before reconnecting LFP bank (limits inrush current)
+- All settings exposed via Venus OS D-Bus settings and web UIs (ports 8088/8089)
 
 ## Deployment
 
@@ -35,12 +38,28 @@ scp config/config.ini root@venus.local:/data/apps/dbus-aggregate-batteries/confi
 ssh root@venus.local /data/apps/dbus-aggregate-batteries/restart.sh
 ```
 
-### fla-equalisation (Part C)
+### FLA services (deploy via sshpass)
 ```bash
-scp -r fla-equalisation/ root@venus.local:/data/apps/fla-equalisation/
-ssh root@venus.local "chmod +x /data/apps/fla-equalisation/fla-equalisation.py"
-# Install cron
-ssh root@venus.local "echo '0 * * * * root /usr/bin/python3 /data/apps/fla-equalisation/fla-equalisation.py' > /etc/cron.d/fla-equalisation"
+# Shared modules
+sshpass -p "$CERBO_ROOT_PASSWORD" scp fla-shared/*.py root@venus.local:/data/apps/fla-shared/
+
+# EQ service
+sshpass -p "$CERBO_ROOT_PASSWORD" scp fla-equalisation/fla_equalisation.py fla-equalisation/settings.py \
+  root@venus.local:/data/apps/fla-equalisation/
+
+# Charge service
+sshpass -p "$CERBO_ROOT_PASSWORD" scp fla-charge/fla_charge.py \
+  root@venus.local:/data/apps/fla-charge/
+
+# Restart
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local 'svc -d /service/fla-equalisation /service/fla-charge && sleep 2 && svc -u /service/fla-equalisation /service/fla-charge'
+```
+
+### Fresh install
+```bash
+# Run install.sh on the Cerbo (copies files, creates daemontools service, adds to rc.local)
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local 'cd /data/apps/fla-equalisation && bash install.sh'
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local 'cd /data/apps/fla-charge && bash install.sh'
 ```
 
 ## References

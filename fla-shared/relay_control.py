@@ -9,7 +9,7 @@ import time
 
 log = logging.getLogger(__name__)
 
-RELAY_CLOSE_DELTA_MAX = 2.0  # Max voltage delta for auto-close (V)
+RELAY_CLOSE_DELTA_MAX = 1.0  # Max voltage delta for auto-close (V)
 
 
 def open_relay(monitor):

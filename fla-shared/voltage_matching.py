@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 def wait_for_match(monitor, temp_service, status, alerting_mod,
                    voltage_delta_max=1.0, timeout_hours=4.0,
-                   float_voltage=None):
+                   float_voltage=None, cache_callback=None):
     """Wait for |V_trojan - V_lfp| < voltage_delta_max.
 
     If float_voltage is provided, reduces CVL to that voltage first.
@@ -46,6 +46,10 @@ def wait_for_match(monitor, temp_service, status, alerting_mod,
             remaining = max(0, match_timeout - elapsed)
             status.update(time_remaining=remaining, trojan_v=v_trojan, lfp_v=v_lfp)
             temp_service.update_voltage_current(v_trojan, monitor.get_trojan_current())
+
+            if cache_callback:
+                cache_callback(trojan_v=v_trojan, lfp_v=v_lfp,
+                               voltage_delta=delta, time_remaining=remaining)
 
             if delta < voltage_delta_max:
                 log.info("Voltage converged: Trojan=%.2fV, LFP=%.2fV, delta=%.2fV",

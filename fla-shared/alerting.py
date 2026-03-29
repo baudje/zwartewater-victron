@@ -1,8 +1,9 @@
-"""Alerting for FLA equalisation — buzzer, D-Bus alarm, logging."""
+"""Alerting for FLA services — buzzer, D-Bus alarm, logging."""
 
 import dbus
 import logging
-import os
+
+from dbus_monitor import get_bus
 
 log = logging.getLogger(__name__)
 
@@ -10,16 +11,10 @@ BUZZER_PATH = "/Buzzer/State"
 SYSTEM_SERVICE = "com.victronenergy.system"
 
 
-def _get_bus():
-    if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
-        return dbus.SessionBus()
-    return dbus.SystemBus()
-
-
 def activate_buzzer():
     """Activate Cerbo GX buzzer."""
     try:
-        bus = _get_bus()
+        bus = get_bus()
         obj = bus.get_object(SYSTEM_SERVICE, BUZZER_PATH)
         iface = dbus.Interface(obj, "com.victronenergy.BusItem")
         iface.SetValue(dbus.Int32(1))
@@ -31,7 +26,7 @@ def activate_buzzer():
 def deactivate_buzzer():
     """Deactivate Cerbo GX buzzer."""
     try:
-        bus = _get_bus()
+        bus = get_bus()
         obj = bus.get_object(SYSTEM_SERVICE, BUZZER_PATH)
         iface = dbus.Interface(obj, "com.victronenergy.BusItem")
         iface.SetValue(dbus.Int32(0))
