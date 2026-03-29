@@ -20,12 +20,23 @@ mkdir -p "${LOG_DIR}"
 
 # Copy files
 cp "${SCRIPT_DIR}/fla_equalisation.py" "${INSTALL_DIR}/"
-cp "${SCRIPT_DIR}/dbus_battery_service.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/dbus_monitor.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/dbus_status_service.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/settings.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/alerting.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/web_server.py" "${INSTALL_DIR}/"
+
+# Install shared modules
+SHARED_DIR="/data/apps/fla-shared"
+mkdir -p "${SHARED_DIR}"
+if [ -d "${SCRIPT_DIR}/../fla-shared" ]; then
+    for f in __init__.py relay_control.py voltage_matching.py aggregate_driver.py lock.py dbus_monitor.py alerting.py temp_battery.py; do
+        cp "${SCRIPT_DIR}/../fla-shared/${f}" "${SHARED_DIR}/"
+    done
+    mkdir -p "${SHARED_DIR}/ext"
+    ln -sfn /data/apps/dbus-aggregate-batteries/ext/velib_python "${SHARED_DIR}/ext/velib_python"
+    echo "Shared modules installed to ${SHARED_DIR}"
+fi
 
 # Copy service/run
 cp "${SCRIPT_DIR}/service/run" "${SERVICE_DIR}/run"
