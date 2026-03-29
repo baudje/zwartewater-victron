@@ -1,7 +1,7 @@
-"""Simple web UI for FLA equalisation status and control.
+"""Simple web UI for FLA charge status and control.
 
-Serves a single-page dashboard at port 8088 on the Cerbo GX.
-Access via http://venus.local:8088
+Serves a single-page dashboard at port 8089 on the Cerbo GX.
+Access via http://venus.local:8089
 
 Data is read from a shared cache dict updated by the main GLib loop,
 avoiding cross-thread D-Bus calls.
@@ -16,7 +16,7 @@ from threading import Thread
 
 log = logging.getLogger(__name__)
 
-PORT = 8088
+PORT = 8089
 
 # Shared cache — written by GLib thread, read by HTTP thread
 _cache = {
@@ -25,12 +25,12 @@ _cache = {
     "trojan_voltage": None,
     "lfp_voltage": None,
     "voltage_delta": None,
-    "last_equalisation": None,
-    "days_until_next": None,
+    "trojan_soc": None,
+    "lfp_soc": None,
+    "trojan_current": None,
+    "last_charge": None,
     "settings": {},
     "run_now_requested": False,
-    "inrush_current": None,
-    "reconnect_delta": None,
 }
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -38,7 +38,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>FLA Equalisation</title>
+<title>FLA Charge</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, sans-serif; background: #0d1b2a; color: #e0e0e0;
@@ -66,19 +66,22 @@ HTML_PAGE = """<!DOCTYPE html>
   .ok { color: #4caf50; font-size: 0.8em; margin-left: 4px; }
   .unit { color: #667; font-size: 0.85em; margin-left: 2px; }
   .updated { color: #556677; font-size: 0.75em; margin-top: 8px; text-align: center; }
+  .nav { color: #556677; font-size: 0.8em; margin-top: 10px; text-align: center; }
+  .nav a { color: #4a8ad9; text-decoration: none; }
+  .nav a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
-<h1>FLA Equalisation</h1>
+<h1>FLA Charge</h1>
 
 <div class="card">
   <h2>Status</h2>
   <div class="row"><span class="label">State</span><span class="value" id="state">-</span></div>
   <div class="row"><span class="label">Time remaining</span><span class="value" id="time">-</span></div>
-  <div class="row"><span class="label">Last equalisation</span><span class="value" id="last">-</span></div>
-  <div class="row"><span class="label">Next due in</span><span class="value" id="next">-</span></div>
-  <div class="row"><span class="label">Last inrush current</span><span class="value" id="inrush">-</span></div>
-  <div class="row"><span class="label">Last reconnect delta</span><span class="value" id="rdelta">-</span></div>
+  <div class="row"><span class="label">Last charge</span><span class="value" id="last">-</span></div>
+  <div class="row"><span class="label">Trojan SoC</span><span class="value" id="trojan_soc">-</span></div>
+  <div class="row"><span class="label">LFP SoC</span><span class="value" id="lfp_soc">-</span></div>
+  <div class="row"><span class="label">Trojan current</span><span class="value" id="trojan_current">-</span></div>
 </div>
 
 <div class="card">
@@ -90,37 +93,46 @@ HTML_PAGE = """<!DOCTYPE html>
 
 <div class="card">
   <h2>Settings</h2>
-  <div class="row"><span class="label">EQ voltage</span><span><input class="si" id="s_eqv" data-key="eq_voltage" data-type="f"><span class="unit">V</span><span class="ok" id="ok_eq_voltage"></span></span></div>
-  <div class="row"><span class="label">Complete current</span><span><input class="si" id="s_eqi" data-key="eq_current_complete" data-type="f"><span class="unit">A</span><span class="ok" id="ok_eq_current_complete"></span></span></div>
-  <div class="row"><span class="label">Max duration</span><span><input class="si" id="s_timeout" data-key="eq_timeout_hours" data-type="f"><span class="unit">hrs</span><span class="ok" id="ok_eq_timeout_hours"></span></span></div>
-  <div class="row"><span class="label">Float voltage</span><span><input class="si" id="s_float" data-key="float_voltage" data-type="f"><span class="unit">V</span><span class="ok" id="ok_float_voltage"></span></span></div>
-  <div class="row"><span class="label">Max reconnect delta</span><span><input class="si" id="s_delta" data-key="voltage_delta_max" data-type="f"><span class="unit">V</span><span class="ok" id="ok_voltage_delta_max"></span></span></div>
-  <div class="row"><span class="label">Interval</span><span><input class="si" id="s_days" data-key="days_between" data-type="i"><span class="unit">days</span><span class="ok" id="ok_days_between"></span></span></div>
-  <div class="row"><span class="label">Start hour</span><span><input class="si" id="s_start" data-key="start_hour" data-type="i"><span class="unit">:00</span><span class="ok" id="ok_start_hour"></span></span></div>
-  <div class="row"><span class="label">End hour</span><span><input class="si" id="s_end" data-key="end_hour" data-type="i"><span class="unit">:00</span><span class="ok" id="ok_end_hour"></span></span></div>
-  <div class="row"><span class="label">Min LFP SoC</span><span><input class="si" id="s_soc" data-key="lfp_soc_min" data-type="i"><span class="unit">%</span><span class="ok" id="ok_lfp_soc_min"></span></span></div>
   <div class="row"><span class="label">Enabled</span><span><select class="si" id="s_enabled" data-key="enabled" data-type="i"><option value="1">Yes</option><option value="0">No</option></select><span class="ok" id="ok_enabled"></span></span></div>
+  <div class="row"><span class="label">Trojan SoC trigger</span><span><input class="si" id="s_trojan_soc_trigger" data-key="trojan_soc_trigger" data-type="i"><span class="unit">%</span><span class="ok" id="ok_trojan_soc_trigger"></span></span></div>
+  <div class="row"><span class="label">LFP SoC transition</span><span><input class="si" id="s_lfp_soc_transition" data-key="lfp_soc_transition" data-type="i"><span class="unit">%</span><span class="ok" id="ok_lfp_soc_transition"></span></span></div>
+  <div class="row"><span class="label">LFP cell V disconnect</span><span><input class="si" id="s_lfp_cell_voltage_disconnect" data-key="lfp_cell_voltage_disconnect" data-type="f"><span class="unit">V</span><span class="ok" id="ok_lfp_cell_voltage_disconnect"></span></span></div>
+  <div class="row"><span class="label">Current taper threshold</span><span><input class="si" id="s_current_taper_threshold" data-key="current_taper_threshold" data-type="f"><span class="unit">A</span><span class="ok" id="ok_current_taper_threshold"></span></span></div>
+  <div class="row"><span class="label">FLA bulk voltage</span><span><input class="si" id="s_fla_bulk_voltage" data-key="fla_bulk_voltage" data-type="f"><span class="unit">V</span><span class="ok" id="ok_fla_bulk_voltage"></span></span></div>
+  <div class="row"><span class="label">Absorption complete I</span><span><input class="si" id="s_fla_absorption_complete_current" data-key="fla_absorption_complete_current" data-type="f"><span class="unit">A</span><span class="ok" id="ok_fla_absorption_complete_current"></span></span></div>
+  <div class="row"><span class="label">Absorption max hours</span><span><input class="si" id="s_fla_absorption_max_hours" data-key="fla_absorption_max_hours" data-type="f"><span class="unit">hrs</span><span class="ok" id="ok_fla_absorption_max_hours"></span></span></div>
+  <div class="row"><span class="label">FLA float voltage</span><span><input class="si" id="s_fla_float_voltage" data-key="fla_float_voltage" data-type="f"><span class="unit">V</span><span class="ok" id="ok_fla_float_voltage"></span></span></div>
+  <div class="row"><span class="label">Max reconnect delta</span><span><input class="si" id="s_voltage_delta_max" data-key="voltage_delta_max" data-type="f"><span class="unit">V</span><span class="ok" id="ok_voltage_delta_max"></span></span></div>
+  <div class="row"><span class="label">Voltage match timeout</span><span><input class="si" id="s_voltage_match_timeout_hours" data-key="voltage_match_timeout_hours" data-type="f"><span class="unit">hrs</span><span class="ok" id="ok_voltage_match_timeout_hours"></span></span></div>
+  <div class="row"><span class="label">Phase 1 timeout</span><span><input class="si" id="s_phase1_timeout_hours" data-key="phase1_timeout_hours" data-type="f"><span class="unit">hrs</span><span class="ok" id="ok_phase1_timeout_hours"></span></span></div>
 </div>
 
 <div class="card">
   <h2>Control</h2>
-  <button class="btn" onclick="runNow()">Run Equalisation Now</button>
+  <button class="btn" onclick="runNow()">Run Charge Now</button>
   <span id="run_msg" style="margin-left: 8px; color: #8899aa; font-size:0.85em;"></span>
 </div>
 
-<div class="card" style="text-align:center">
-  <a href="http://venus.local:8089" style="color:#8bb4d9; text-decoration:none">FLA Charge Service →</a>
-</div>
-
 <div class="updated" id="updated"></div>
+<div class="nav">Also see: <a href="http://venus.local:8088">FLA Equalisation</a></div>
 
 <script>
-var STATES = {0:"Idle", 1:"Stopping driver", 2:"Disconnecting LFP",
-  3:"Equalising FLA", 4:"Cooling down", 5:"Voltage matching",
-  6:"Reconnecting LFP", 7:"Restarting driver", 8:"Error"};
+var STATES = {
+  0: "Idle",
+  1: "Phase 1 Shared Charging",
+  2: "Stopping Driver",
+  3: "Disconnecting",
+  4: "Phase 2 FLA Bulk",
+  5: "Phase 3 Absorption",
+  6: "Cooling Down",
+  7: "Voltage Matching",
+  8: "Reconnecting",
+  9: "Restarting Driver",
+  10: "Error"
+};
 var initialLoad = true;
 
-function sc(s) { return s===0?"idle":s===8?"error":"active"; }
+function sc(s) { return s===0?"idle":s===10?"error":"active"; }
 function fmt(v,u,d) { return (v==null||v==undefined)? "-" : parseFloat(v).toFixed(d||2)+" "+(u||""); }
 function fmtT(s) { if(!s||s<=0) return "-"; var m=Math.floor(s/60),h=Math.floor(m/60); return h>0?h+"h "+(m%60)+"m":m+"m"; }
 function si(id,v) { var e=document.getElementById(id); if(e&&(initialLoad||document.activeElement!==e)) e.value=v!=null?v:""; }
@@ -146,20 +158,26 @@ function refresh() {
     var el=document.getElementById("state");
     el.textContent=STATES[d.state]||"Unknown"; el.className="value "+sc(d.state);
     document.getElementById("time").textContent=fmtT(d.time_remaining);
-    document.getElementById("last").textContent=d.last_equalisation||"Never";
-    document.getElementById("next").textContent=d.days_until_next!=null?d.days_until_next+" days":"Due now";
+    document.getElementById("last").textContent=d.last_charge||"Never";
+    document.getElementById("trojan_soc").textContent=fmt(d.trojan_soc,"%",0);
+    document.getElementById("lfp_soc").textContent=fmt(d.lfp_soc,"%",0);
+    document.getElementById("trojan_current").textContent=fmt(d.trojan_current,"A",1);
     document.getElementById("vtrojan").textContent=fmt(d.trojan_voltage,"V");
     document.getElementById("vlfp").textContent=fmt(d.lfp_voltage,"V");
     document.getElementById("delta").textContent=fmt(d.voltage_delta,"V");
-    document.getElementById("inrush").textContent=fmt(d.inrush_current,"A",1);
-    document.getElementById("rdelta").textContent=fmt(d.reconnect_delta,"V");
     if(d.settings){
-      si("s_eqv",d.settings.eq_voltage); si("s_eqi",d.settings.eq_current_complete);
-      si("s_timeout",d.settings.eq_timeout_hours); si("s_float",d.settings.float_voltage);
-      si("s_delta",d.settings.voltage_delta_max); si("s_days",d.settings.days_between);
-      si("s_start",d.settings.start_hour); si("s_end",d.settings.end_hour);
-      si("s_soc",d.settings.lfp_soc_min);
       var sel=document.getElementById("s_enabled"); if(sel) sel.value=d.settings.enabled?"1":"0";
+      si("s_trojan_soc_trigger",d.settings.trojan_soc_trigger);
+      si("s_lfp_soc_transition",d.settings.lfp_soc_transition);
+      si("s_lfp_cell_voltage_disconnect",d.settings.lfp_cell_voltage_disconnect);
+      si("s_current_taper_threshold",d.settings.current_taper_threshold);
+      si("s_fla_bulk_voltage",d.settings.fla_bulk_voltage);
+      si("s_fla_absorption_complete_current",d.settings.fla_absorption_complete_current);
+      si("s_fla_absorption_max_hours",d.settings.fla_absorption_max_hours);
+      si("s_fla_float_voltage",d.settings.fla_float_voltage);
+      si("s_voltage_delta_max",d.settings.voltage_delta_max);
+      si("s_voltage_match_timeout_hours",d.settings.voltage_match_timeout_hours);
+      si("s_phase1_timeout_hours",d.settings.phase1_timeout_hours);
     }
     document.getElementById("updated").textContent="Updated "+new Date().toLocaleTimeString();
     initialLoad=false;
@@ -169,7 +187,7 @@ function refresh() {
 }
 
 function runNow() {
-  if(!confirm("Start FLA equalisation now?\\n(LFP SoC must be >= 95%)")) return;
+  if(!confirm("Start FLA charge now?")) return;
   fetch("/api/run-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
     document.getElementById("run_msg").textContent=d.message;
     setTimeout(refresh,2000);
@@ -184,8 +202,8 @@ setInterval(refresh,5000);
 
 
 def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
-                 voltage_delta=None, last_eq=None, days_until=None, settings=None,
-                 inrush_current=None, reconnect_delta=None):
+                 voltage_delta=None, trojan_soc=None, lfp_soc=None,
+                 trojan_current=None, last_charge=None, settings=None):
     """Update the shared cache from the GLib main loop thread."""
     if state is not None:
         _cache["state"] = state
@@ -197,16 +215,16 @@ def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
         _cache["lfp_voltage"] = lfp_v
     if voltage_delta is not None:
         _cache["voltage_delta"] = voltage_delta
-    if last_eq is not None:
-        _cache["last_equalisation"] = last_eq
-    if days_until is not None:
-        _cache["days_until_next"] = days_until
+    if trojan_soc is not None:
+        _cache["trojan_soc"] = trojan_soc
+    if lfp_soc is not None:
+        _cache["lfp_soc"] = lfp_soc
+    if trojan_current is not None:
+        _cache["trojan_current"] = trojan_current
+    if last_charge is not None:
+        _cache["last_charge"] = last_charge
     if settings is not None:
         _cache["settings"] = settings
-    if inrush_current is not None:
-        _cache["inrush_current"] = inrush_current
-    if reconnect_delta is not None:
-        _cache["reconnect_delta"] = reconnect_delta
 
 
 def check_run_now():
@@ -242,7 +260,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/run-now":
             _cache["run_now_requested"] = True
-            msg = {"message": "RunNow requested — will start at next check (SoC must be >= 95%)"}
+            msg = {"message": "RunNow requested — will start at next check"}
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

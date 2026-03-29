@@ -1,16 +1,16 @@
 #!/bin/bash
-# Install FLA equalisation service on Venus OS
+# Install FLA charge service on Venus OS
 set -e
 
-INSTALL_DIR="/data/apps/fla-equalisation"
+INSTALL_DIR="/data/apps/fla-charge"
 SERVICE_DIR="${INSTALL_DIR}/service"
 LOG_DIR="/data/log"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-echo "Installing FLA equalisation service to ${INSTALL_DIR}..."
+echo "Installing FLA charge service to ${INSTALL_DIR}..."
 
 # Stop existing service if running
-svc -d /service/fla-equalisation 2>/dev/null || true
+svc -d /service/fla-charge 2>/dev/null || true
 sleep 2
 
 # Create directories
@@ -19,11 +19,9 @@ mkdir -p "${SERVICE_DIR}"
 mkdir -p "${LOG_DIR}"
 
 # Copy files
-cp "${SCRIPT_DIR}/fla_equalisation.py" "${INSTALL_DIR}/"
-cp "${SCRIPT_DIR}/dbus_monitor.py" "${INSTALL_DIR}/"
+cp "${SCRIPT_DIR}/fla_charge.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/dbus_status_service.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/settings.py" "${INSTALL_DIR}/"
-cp "${SCRIPT_DIR}/alerting.py" "${INSTALL_DIR}/"
 cp "${SCRIPT_DIR}/web_server.py" "${INSTALL_DIR}/"
 
 # Install shared modules
@@ -42,7 +40,7 @@ fi
 cp "${SCRIPT_DIR}/service/run" "${SERVICE_DIR}/run"
 
 # Make executable
-chmod +x "${INSTALL_DIR}/fla_equalisation.py"
+chmod +x "${INSTALL_DIR}/fla_charge.py"
 chmod +x "${SERVICE_DIR}/run"
 
 # Symlink velib_python from aggregate batteries
@@ -56,18 +54,15 @@ else
     exit 1
 fi
 
-# Remove old cron job if present
-rm -f /etc/cron.d/fla-equalisation
-
 # Create daemontools service symlink
-ln -sfn "${SERVICE_DIR}" /service/fla-equalisation
-echo "Service symlink created at /service/fla-equalisation"
+ln -sfn "${SERVICE_DIR}" /service/fla-charge
+echo "Service symlink created at /service/fla-charge"
 
 # Add to rc.local for persistence across Venus OS firmware upgrades
-if ! grep -q "fla-equalisation" /data/rc.local 2>/dev/null; then
+if ! grep -q "fla-charge" /data/rc.local 2>/dev/null; then
     echo "" >> /data/rc.local
-    echo "# FLA Equalisation service" >> /data/rc.local
-    echo "ln -sfn /data/apps/fla-equalisation/service /service/fla-equalisation" >> /data/rc.local
+    echo "# FLA Charge service" >> /data/rc.local
+    echo "ln -sfn /data/apps/fla-charge/service /service/fla-charge" >> /data/rc.local
     echo "Added to /data/rc.local for auto-start on firmware upgrade"
 fi
 
@@ -75,5 +70,5 @@ fi
 sleep 3
 echo ""
 echo "Installation complete."
-echo "Service status: $(svstat /service/fla-equalisation 2>/dev/null || echo 'starting...')"
-echo "Configure settings via Cerbo GX Device List or VRM."
+echo "Service status: $(svstat /service/fla-charge 2>/dev/null || echo 'starting...')"
+echo "Web UI available at http://venus.local:8089"
