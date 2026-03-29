@@ -88,27 +88,28 @@ def should_run(settings, monitor):
         log.debug("Equalisation disabled")
         return False
 
-    # Check RunNow override
-    if settings.run_now:
-        log.info("RunNow flag set — bypassing schedule checks")
+    # Check RunNow override (bypasses interval and time window, NOT SoC)
+    run_now_flag = settings.run_now
+    if run_now_flag:
+        log.info("RunNow flag set — bypassing interval and time window checks")
         settings.clear_run_now()
-        return True
 
-    # Check interval
-    last = read_last_equalisation()
-    if last is not None:
-        days_since = (datetime.now() - last).days
-        if days_since < settings.days_between:
-            log.debug("Only %d days since last equalisation (need %d)", days_since, settings.days_between)
+    if not run_now_flag:
+        # Check interval
+        last = read_last_equalisation()
+        if last is not None:
+            days_since = (datetime.now() - last).days
+            if days_since < settings.days_between:
+                log.debug("Only %d days since last equalisation (need %d)", days_since, settings.days_between)
+                return False
+
+        # Check afternoon window
+        now = datetime.now()
+        if not (settings.start_hour <= now.hour < settings.end_hour):
+            log.debug("Outside afternoon window (%d:00-%d:00)", settings.start_hour, settings.end_hour)
             return False
 
-    # Check afternoon window
-    now = datetime.now()
-    if not (settings.start_hour <= now.hour < settings.end_hour):
-        log.debug("Outside afternoon window (%d:00-%d:00)", settings.start_hour, settings.end_hour)
-        return False
-
-    # Check LFP SoC
+    # Check LFP SoC (always enforced, even on RunNow)
     soc = monitor.get_lfp_soc()
     if soc is None:
         log.warning("Cannot read LFP SoC")
@@ -117,7 +118,7 @@ def should_run(settings, monitor):
         log.debug("LFP SoC %.1f%% < %d%% minimum", soc, settings.lfp_soc_min)
         return False
 
-    log.info("All conditions met: SoC=%.1f%%, time=%s", soc, now.strftime("%H:%M"))
+    log.info("All conditions met: SoC=%.1f%%, time=%s", soc, datetime.now().strftime("%H:%M"))
     return True
 
 
@@ -131,7 +132,7 @@ def run_equalisation(settings, monitor, status):
         status.update(state=STATE_STOPPING_DRIVER)
         if not stop_aggregate_driver():
             status.update(state=STATE_ERROR)
-            raise_alarm("Failed to stop aggregate driver")
+            raise_alarm("Failed to stop aggregate driver", status_service=status)
             return False
         aggregate_stopped = True
 
@@ -147,7 +148,7 @@ def run_equalisation(settings, monitor, status):
         status.update(state=STATE_DISCONNECTING)
         if not monitor.set_relay(0):
             status.update(state=STATE_ERROR)
-            raise_alarm("Failed to open relay 2")
+            raise_alarm("Failed to open relay 2", status_service=status)
             return False
         log.info("Relay 2 opened — LFP direct path disconnected, Orion activating")
 
@@ -155,8 +156,12 @@ def run_equalisation(settings, monitor, status):
         time.sleep(10)  # Wait for relay + Orion to settle
         lfp_current = monitor.get_lfp_current()
         if lfp_current is not None and abs(lfp_current) > 5.0:
-            log.warning("LFP current still %.1fA after relay open — Orion taking over", lfp_current)
-            # Not a hard failure — Orion may be drawing current
+            status.update(state=STATE_ERROR)
+            raise_alarm(
+                "LFP current still %.1fA after relay open — relay may not have opened" % abs(lfp_current),
+                status_service=status,
+            )
+            return False
 
         # Step 5: Equalisation — monitor Trojan current
         status.update(state=STATE_EQUALISING)
@@ -183,7 +188,7 @@ def run_equalisation(settings, monitor, status):
             # Check SmartShunt Trojan responsive
             if v_trojan is None:
                 status.update(state=STATE_ERROR)
-                raise_alarm("SmartShunt Trojan (279) unresponsive during equalisation")
+                raise_alarm("SmartShunt Trojan (279) unresponsive during equalisation", status_service=status)
                 return False
 
             # Check completion: current below threshold
@@ -228,6 +233,15 @@ def run_equalisation(settings, monitor, status):
             v_trojan = monitor.get_trojan_voltage()
             v_lfp = monitor.get_lfp_voltage()
 
+            # Check SmartShunt Trojan responsive
+            if v_trojan is None:
+                status.update(state=STATE_ERROR)
+                raise_alarm(
+                    "SmartShunt Trojan (279) unresponsive during voltage matching",
+                    status_service=status,
+                )
+                return False
+
             if v_trojan is not None and v_lfp is not None:
                 delta = abs(v_trojan - v_lfp)
                 remaining = max(0, match_timeout - elapsed)
@@ -257,7 +271,8 @@ def run_equalisation(settings, monitor, status):
                     "Voltage delta did not converge after %.0f hours. "
                     "Trojan=%.2fV, LFP=%.2fV, delta=%.2fV. "
                     "LFPs remain disconnected — manual intervention required."
-                    % (elapsed / 3600, v_trojan or 0, v_lfp or 0, delta if v_trojan and v_lfp else 0)
+                    % (elapsed / 3600, v_trojan or 0, v_lfp or 0, delta if v_trojan and v_lfp else 0),
+                    status_service=status,
                 )
                 return False
 
@@ -266,7 +281,7 @@ def run_equalisation(settings, monitor, status):
         # Step 8: Close relay 2
         status.update(state=STATE_RECONNECTING)
         if not monitor.set_relay(1):
-            raise_alarm("Failed to close relay 2")
+            raise_alarm("Failed to close relay 2", status_service=status)
             return False
         log.info("Relay 2 closed — LFP direct path restored")
         time.sleep(5)
@@ -278,19 +293,20 @@ def run_equalisation(settings, monitor, status):
         # Step 10: Restart aggregate driver
         status.update(state=STATE_RESTARTING_DRIVER)
         if not start_aggregate_driver():
-            raise_alarm("Failed to restart aggregate driver")
+            raise_alarm("Failed to restart aggregate driver", status_service=status)
             return False
+        monitor.invalidate_services()
 
         # Step 11: Record success
         write_last_equalisation()
         status.update(state=STATE_IDLE, time_remaining=0)
         log.info("Equalisation completed successfully")
-        clear_alarm()
+        clear_alarm(status_service=status)
         return True
 
     except Exception as e:
         log.exception("Unexpected error during equalisation: %s", e)
-        raise_alarm("Equalisation script error: %s" % e)
+        raise_alarm("Equalisation script error: %s" % e, status_service=status)
         return False
 
     finally:
@@ -322,6 +338,7 @@ def main():
 
     log.info("FLA equalisation check starting")
 
+    status = None
     try:
         settings = Settings()
         monitor = DbusMonitor(
@@ -344,7 +361,7 @@ def main():
 
     except Exception as e:
         log.exception("Fatal error: %s", e)
-        raise_alarm("FLA equalisation fatal error: %s" % e)
+        raise_alarm("FLA equalisation fatal error: %s" % e, status_service=status)
 
     log.info("FLA equalisation check finished")
 

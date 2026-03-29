@@ -119,7 +119,7 @@ class TempBatteryService:
         if not self._registered:
             return
         try:
-            self._service.__del__()
+            self._service["/Connected"] = 0
         except Exception as e:
             log.warning("Error deregistering service: %s", e)
         self._registered = False
