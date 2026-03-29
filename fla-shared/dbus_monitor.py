@@ -159,6 +159,12 @@ class DbusMonitor:
         """Read Cerbo relay 2 state. Returns 0 (open) or 1 (closed), or None."""
         return _get_dbus_value(self.bus, SYSTEM_SERVICE, RELAY_STATE_PATH)
 
+    def _get_active_battery_service(self):
+        """Read the active battery service from DVCC."""
+        return _get_dbus_value(
+            self.bus, "com.victronenergy.system", "/ActiveBatteryService",
+        )
+
     def get_dvcc_max_charge_voltage(self):
         """Read the DVCC system MaxChargeVoltage setting."""
         return _get_dbus_value(

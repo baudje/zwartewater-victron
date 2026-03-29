@@ -136,6 +136,16 @@ def run_equalisation(settings, monitor, status):
             return False
         aggregate_stopped = True
 
+        # Wait for DVCC to discover our temp service as the active battery
+        for _ in range(30):
+            active = monitor._get_active_battery_service()
+            if active and "fla_equalisation" in str(active):
+                log.info("DVCC discovered temp battery service: %s", active)
+                break
+            time.sleep(1)
+        else:
+            log.warning("DVCC did not discover temp service after 30s — proceeding anyway")
+
         # Step 3: Open relay 2 (disconnect LFP direct path)
         status.update(state=STATE_DISCONNECTING)
         if not open_relay(monitor):

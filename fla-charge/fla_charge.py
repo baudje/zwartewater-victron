@@ -219,6 +219,16 @@ def run_charge(settings, monitor, status):
             return False
         aggregate_stopped = True
 
+        # Wait for DVCC to discover our temp service
+        for _ in range(30):
+            active = monitor._get_active_battery_service()
+            if active and "fla" in str(active):
+                log.info("DVCC discovered temp battery service: %s", active)
+                break
+            time.sleep(1)
+        else:
+            log.warning("DVCC did not discover temp service after 30s — proceeding anyway")
+
         status.update(state=STATE_DISCONNECTING)
         if not open_relay(monitor):
             status.update(state=STATE_ERROR)
