@@ -16,19 +16,39 @@ LOCK_FILE = "/data/apps/fla-shared/operation.lock"
 
 
 def acquire(service_name):
-    """Acquire the operation lock. Returns True if acquired, False if held by another."""
-    if is_locked():
-        holder_info = holder()
-        log.debug("Lock held by %s since %s", holder_info.get("service"), holder_info.get("started"))
-        return False
+    """Acquire the operation lock atomically. Returns True if acquired, False if held by another."""
+    # Clean stale locks first (PID no longer running)
+    if Path(LOCK_FILE).exists():
+        try:
+            info = json.loads(Path(LOCK_FILE).read_text())
+            pid = info.get("pid")
+            if pid and _pid_exists(pid):
+                log.debug("Lock held by %s since %s (PID %s)",
+                          info.get("service"), info.get("started"), pid)
+                return False
+            log.warning("Stale lock from PID %s — clearing", pid)
+            Path(LOCK_FILE).unlink(missing_ok=True)
+        except (json.JSONDecodeError, OSError):
+            Path(LOCK_FILE).unlink(missing_ok=True)
+
+    # Atomic creation with O_EXCL — prevents TOCTOU race
     try:
-        Path(LOCK_FILE).write_text(json.dumps({
-            "service": service_name,
-            "started": datetime.now().isoformat(),
-            "pid": os.getpid(),
-        }))
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            content = json.dumps({
+                "service": service_name,
+                "started": datetime.now().isoformat(),
+                "pid": os.getpid(),
+            })
+            os.write(fd, content.encode())
+        finally:
+            os.close(fd)
         log.info("Operation lock acquired by %s", service_name)
         return True
+    except FileExistsError:
+        # Another process acquired between our stale check and open
+        log.debug("Lock acquired by another process during race window")
+        return False
     except OSError as e:
         log.error("Failed to acquire lock: %s", e)
         return False
@@ -44,16 +64,14 @@ def release():
 
 
 def is_locked():
-    """Check if the lock is held. Also cleans stale locks (PID no longer running)."""
+    """Check if the lock is held by a live process."""
     if not Path(LOCK_FILE).exists():
         return False
     try:
         info = json.loads(Path(LOCK_FILE).read_text())
         pid = info.get("pid")
         if pid and not _pid_exists(pid):
-            log.warning("Stale lock from PID %s — clearing", pid)
-            release()
-            return False
+            return False  # Stale — acquire() will clean it
         return True
     except (json.JSONDecodeError, OSError):
         return False

@@ -24,8 +24,9 @@ sys.modules['gi.repository'] = MagicMock()
 # Mock velib_python
 sys.modules['vedbus'] = MagicMock()
 
-# Add project to path
+# Add project and shared modules to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared'))
 
 # Patch FileHandler before importing fla_equalisation (it creates one at import time)
 import logging
@@ -46,10 +47,10 @@ from dbus_status_service import (
 class MockSettings:
     """Mock Settings object with configurable properties."""
     def __init__(self, **kwargs):
-        self.eq_voltage = kwargs.get('eq_voltage', 31.2)
-        self.eq_current_complete = kwargs.get('eq_current_complete', 8.0)
+        self.eq_voltage = kwargs.get('eq_voltage', 31.5)
+        self.eq_current_complete = kwargs.get('eq_current_complete', 10.0)
         self.eq_timeout_hours = kwargs.get('eq_timeout_hours', 2.5)
-        self.float_voltage = kwargs.get('float_voltage', 27.6)
+        self.float_voltage = kwargs.get('float_voltage', 27.0)
         self.voltage_delta_max = kwargs.get('voltage_delta_max', 1.0)
         self.voltage_match_timeout_hours = kwargs.get('voltage_match_timeout_hours', 4.0)
         self.days_between = kwargs.get('days_between', 90)
@@ -102,6 +103,21 @@ class MockMonitor:
         self._relay_set_calls.append(state)
         self._relay_state = state
         return True
+
+    def get_battery_service_setting(self):
+        return "com.victronenergy.battery.aggregate"
+
+    def set_battery_service_setting(self, value):
+        return True
+
+    def get_dvcc_max_charge_voltage(self):
+        return 28.4
+
+    def set_dvcc_max_charge_voltage(self, voltage):
+        return True
+
+    def get_trojan_soc(self):
+        return 85.0
 
     def invalidate_services(self):
         self._invalidated = True
@@ -249,9 +265,11 @@ class TestSafetyGuards(unittest.TestCase):
         status = MockStatus()
         return settings, monitor, status
 
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
     @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
     @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    def test_aggregate_stop_failure_aborts(self, mock_start, mock_stop):
+    def test_aggregate_stop_failure_aborts(self, mock_start, mock_stop, mock_lock, mock_unlock):
         settings, monitor, status = self._make_mocks()
         with patch('fla_equalisation.TempBatteryService') as MockTBS:
             MockTBS.return_value = MagicMock()
@@ -259,9 +277,11 @@ class TestSafetyGuards(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
     @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
     @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    def test_relay_open_failure_aborts(self, mock_start, mock_stop):
+    def test_relay_open_failure_aborts(self, mock_start, mock_stop, mock_lock, mock_unlock):
         settings, monitor, status = self._make_mocks()
         monitor.set_relay = MagicMock(return_value=False)
         with patch('fla_equalisation.TempBatteryService') as MockTBS:
@@ -270,10 +290,13 @@ class TestSafetyGuards(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
     @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
     @patch('fla_equalisation.start_aggregate_driver', return_value=True)
     @patch('fla_equalisation.time')
-    def test_high_lfp_current_after_relay_open_aborts(self, mock_time, mock_start, mock_stop):
+    def test_high_lfp_current_after_relay_open_aborts(self, mock_time, mock_start, mock_stop,
+                                                       mock_lock, mock_unlock):
         """CRIT-2 test: if LFP current > 5A after relay open, abort."""
         settings, monitor, status = self._make_mocks(lfp_current=20.0)
         with patch('fla_equalisation.TempBatteryService') as MockTBS:
@@ -287,31 +310,29 @@ class TestFinallySafety(unittest.TestCase):
     """Test the finally block's delta-aware relay handling."""
 
     def test_finally_does_not_close_relay_at_high_delta(self):
-        """CRIT-2: finally block must NOT close relay if delta > 2V."""
+        """CRIT-2: finally block must NOT close relay if delta > 1V (RELAY_CLOSE_DELTA_MAX)."""
         monitor = MockMonitor(
             relay_state=0,  # Relay is open
-            trojan_voltage=30.5,
-            lfp_voltage=27.0,  # Delta = 3.5V
+            trojan_voltage=28.5,
+            lfp_voltage=27.0,  # Delta = 1.5V
         )
-        # The finally block should check delta and refuse to close
-        # We test the logic directly
         v_t = monitor.get_trojan_voltage()
         v_l = monitor.get_lfp_voltage()
         delta = abs(v_t - v_l)
-        self.assertGreater(delta, 2.0)
+        self.assertGreater(delta, 1.0)
         # In the real code, this means relay stays open
 
     def test_finally_closes_relay_at_low_delta(self):
-        """CRIT-2: finally block should close relay if delta < 2V."""
+        """CRIT-2: finally block should close relay if delta < 1V (RELAY_CLOSE_DELTA_MAX)."""
         monitor = MockMonitor(
             relay_state=0,
-            trojan_voltage=27.8,
-            lfp_voltage=27.5,  # Delta = 0.3V
+            trojan_voltage=27.5,
+            lfp_voltage=27.2,  # Delta = 0.3V
         )
         v_t = monitor.get_trojan_voltage()
         v_l = monitor.get_lfp_voltage()
         delta = abs(v_t - v_l)
-        self.assertLess(delta, 2.0)
+        self.assertLess(delta, 1.0)
         # In the real code, this means relay closes safely
 
 
@@ -319,25 +340,25 @@ class TestStartupSafety(unittest.TestCase):
     """Test startup safety check for relay state (CRIT-4)."""
 
     def test_relay_open_low_delta_auto_closes(self):
-        """On startup, if relay is open but delta < 2V, auto-close."""
+        """On startup, if relay is open but delta < 1V, auto-close."""
         monitor = MockMonitor(
             relay_state=0,
-            trojan_voltage=27.5,
-            lfp_voltage=27.3,
+            trojan_voltage=27.3,
+            lfp_voltage=27.1,
         )
         delta = abs(monitor.get_trojan_voltage() - monitor.get_lfp_voltage())
-        self.assertLess(delta, 2.0)
+        self.assertLess(delta, 1.0)
         # Real code would call monitor.set_relay(1)
 
     def test_relay_open_high_delta_raises_alarm(self):
-        """On startup, if relay is open and delta > 2V, alarm — do NOT close."""
+        """On startup, if relay is open and delta > 1V, alarm — do NOT close."""
         monitor = MockMonitor(
             relay_state=0,
-            trojan_voltage=30.0,
+            trojan_voltage=28.5,
             lfp_voltage=27.0,
         )
         delta = abs(monitor.get_trojan_voltage() - monitor.get_lfp_voltage())
-        self.assertGreater(delta, 2.0)
+        self.assertGreater(delta, 1.0)
         # Real code would raise alarm, NOT close relay
 
     def test_relay_closed_no_action(self):
@@ -350,10 +371,10 @@ class TestCrashSafety(unittest.TestCase):
     """Test that crash at any point leaves system in safe state."""
 
     def test_temp_service_registers_at_safe_voltage(self):
-        """Service crash before relay open: CVL must be safe for LFPs (28.4V, not 31.2V)."""
+        """Service crash before relay open: CVL must be safe for LFPs (28.4V, not 31.5V)."""
         # The temp service registers at 28.4V first, only raised to EQ after relay opens
         safe_voltage = 28.4
-        eq_voltage = 31.2
+        eq_voltage = 31.5
         max_lfp_cell = 3.65
         # 28.4V / 8 cells = 3.55V per cell — safe
         self.assertLess(safe_voltage / 8, max_lfp_cell)
@@ -374,10 +395,10 @@ class TestInrushProtection(unittest.TestCase):
         # This is within relay and SmartShunt ratings
         self.assertLessEqual(delta, 1.0)
 
-    def test_3v_delta_is_dangerous(self):
-        """3V delta would cause dangerous inrush — must be blocked."""
-        delta = 3.0
-        max_safe_delta = 2.0
+    def test_1_5v_delta_is_dangerous(self):
+        """1.5V delta would cause dangerous inrush — must be blocked."""
+        delta = 1.5
+        max_safe_delta = 1.0
         self.assertGreater(delta, max_safe_delta)
 
 
@@ -395,11 +416,11 @@ class TestSettings(unittest.TestCase):
         # That's why we verify relay open before raising CVL
 
     def test_eq_voltage_safe_for_trojans(self):
-        """eq_voltage default (31.2V) / 12 cells = 2.6V per FLA cell — standard EQ voltage."""
-        eq_v = 31.2
+        """eq_voltage default (31.5V) / 12 cells = 2.625V per FLA cell — within EQ range."""
+        eq_v = 31.5
         fla_cells = 12
         per_cell = eq_v / fla_cells
-        self.assertAlmostEqual(per_cell, 2.6, places=1)
+        self.assertAlmostEqual(per_cell, 2.625, places=2)
 
 
 if __name__ == '__main__':

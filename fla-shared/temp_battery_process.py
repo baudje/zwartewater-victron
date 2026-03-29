@@ -4,7 +4,7 @@
 Launched as a subprocess to avoid D-Bus root path conflicts.
 Reads CVL/CCL from command-line args, publishes to D-Bus, runs until killed.
 
-Usage: python3 temp_battery_process.py <charge_voltage> <charge_current>
+Usage: python3 temp_battery_process.py <charge_voltage> <charge_current> [trojan_instance]
 """
 
 import dbus
@@ -25,13 +25,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 
+def _find_service_by_instance(bus, instance):
+    """Find a SmartShunt D-Bus service by device instance number."""
+    for prefix in ("com.victronenergy.battery", "com.victronenergy.dcload"):
+        for name in bus.list_names():
+            name = str(name)
+            if not name.startswith(prefix):
+                continue
+            try:
+                obj = bus.get_object(name, "/DeviceInstance")
+                iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+                if int(iface.GetValue()) == instance:
+                    return name
+            except Exception:
+                continue
+    return None
+
+
 def main():
     if len(sys.argv) < 3:
-        print("Usage: temp_battery_process.py <charge_voltage> <charge_current>")
+        print("Usage: temp_battery_process.py <charge_voltage> <charge_current> [trojan_instance]")
         sys.exit(1)
 
     charge_voltage = float(sys.argv[1])
     charge_current = float(sys.argv[2])
+    trojan_instance = int(sys.argv[3]) if len(sys.argv) > 3 else 279
 
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
@@ -77,11 +95,19 @@ def main():
     svc.register()
     log.info("Temp battery service registered: CVL=%.1fV, CCL=%.1fA", charge_voltage, charge_current)
 
+    # Discover SmartShunt Trojan by instance number
+    trojan_service = _find_service_by_instance(bus, trojan_instance)
+    if trojan_service:
+        log.info("Found Trojan SmartShunt: %s (instance %d)", trojan_service, trojan_instance)
+    else:
+        log.warning("Trojan SmartShunt instance %d not found — voltage/current won't update", trojan_instance)
+
     # Watch for CVL update file — parent process writes new voltage here
     cvl_file = "/tmp/fla_eq_cvl"
 
     def update_from_file():
         """Check for CVL update from parent process."""
+        nonlocal trojan_service
         try:
             if os.path.exists(cvl_file):
                 new_cvl = float(open(cvl_file).read().strip())
@@ -91,23 +117,31 @@ def main():
         except (ValueError, OSError):
             pass
 
-        # Also update voltage/current from SmartShunt Trojan
-        try:
-            obj = bus.get_object("com.victronenergy.battery.ttyS7", "/Dc/0/Voltage")
-            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
-            v = float(iface.GetValue())
-            svc["/Dc/0/Voltage"] = v
-        except Exception:
-            pass
-        try:
-            obj = bus.get_object("com.victronenergy.battery.ttyS7", "/Dc/0/Current")
-            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
-            i = float(iface.GetValue())
-            svc["/Dc/0/Current"] = i
-            if v and i:
-                svc["/Dc/0/Power"] = round(v * i, 0)
-        except Exception:
-            pass
+        # Retry discovery if not found yet
+        if trojan_service is None:
+            trojan_service = _find_service_by_instance(bus, trojan_instance)
+            if trojan_service:
+                log.info("Found Trojan SmartShunt: %s", trojan_service)
+
+        # Update voltage/current from SmartShunt Trojan
+        if trojan_service:
+            v = None
+            try:
+                obj = bus.get_object(trojan_service, "/Dc/0/Voltage")
+                iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+                v = float(iface.GetValue())
+                svc["/Dc/0/Voltage"] = v
+            except Exception:
+                pass
+            try:
+                obj = bus.get_object(trojan_service, "/Dc/0/Current")
+                iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+                i = float(iface.GetValue())
+                svc["/Dc/0/Current"] = i
+                if v and i:
+                    svc["/Dc/0/Power"] = round(v * i, 0)
+            except Exception:
+                pass
 
         return True  # Keep timer running
 

@@ -183,7 +183,12 @@ def run_equalisation(settings, monitor, status):
 
             v_lfp = monitor.get_lfp_voltage()
             remaining = max(0, eq_timeout - elapsed)
+            delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan and v_lfp) else None
             status.update(time_remaining=remaining, trojan_v=v_trojan, lfp_v=v_lfp)
+            update_cache(
+                state=STATE_EQUALISING, time_remaining=remaining,
+                trojan_v=v_trojan, lfp_v=v_lfp, voltage_delta=delta,
+            )
 
             if v_trojan is None:
                 status.update(state=STATE_ERROR)
@@ -233,12 +238,18 @@ def run_equalisation(settings, monitor, status):
 
         # Step 6: Reduce CVL to float + voltage matching
         status.update(state=STATE_COOLING_DOWN)
+        update_cache(state=STATE_COOLING_DOWN)
         status.update(state=STATE_VOLTAGE_MATCHING)
+        update_cache(state=STATE_VOLTAGE_MATCHING)
+        def _vm_cache_cb(**kwargs):
+            update_cache(state=STATE_VOLTAGE_MATCHING, **kwargs)
+
         matched, delta = wait_for_match(
             monitor, temp_service, status, alerting,
             voltage_delta_max=settings.voltage_delta_max,
             timeout_hours=settings.voltage_match_timeout_hours,
             float_voltage=settings.float_voltage,
+            cache_callback=_vm_cache_cb,
         )
         if not matched:
             return False

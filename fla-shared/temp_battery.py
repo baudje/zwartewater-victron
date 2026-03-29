@@ -19,16 +19,18 @@ PROCESS_SCRIPT = os.path.join(os.path.dirname(__file__), "temp_battery_process.p
 class TempBatteryService:
     """Manages a temp battery service subprocess for DVCC control."""
 
-    def __init__(self, device_instance=100):
+    def __init__(self, device_instance=100, trojan_instance=279):
         self._process = None
         self._device_instance = device_instance
+        self._trojan_instance = trojan_instance
         self._registered = False
 
     def register(self, charge_voltage, charge_current, discharge_current=0):
         """Launch the temp battery service subprocess."""
         try:
             self._process = subprocess.Popen(
-                ["python3", PROCESS_SCRIPT, str(charge_voltage), str(charge_current)],
+                ["python3", PROCESS_SCRIPT, str(charge_voltage), str(charge_current),
+                 str(self._trojan_instance)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )

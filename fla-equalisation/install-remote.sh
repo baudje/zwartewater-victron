@@ -25,7 +25,6 @@ mkdir -p "${LOG_DIR}"
 echo "Downloading files..."
 for f in \
     fla_equalisation.py \
-    dbus_battery_service.py \
     dbus_monitor.py \
     dbus_status_service.py \
     settings.py \
@@ -39,6 +38,29 @@ done
 # Download service/run
 wget -qO "${SERVICE_DIR}/run" "${BASE_URL}/service/run"
 echo "  service/run"
+
+# Download shared modules
+SHARED_DIR="/data/apps/fla-shared"
+SHARED_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/fla-shared"
+mkdir -p "${SHARED_DIR}"
+echo "Downloading shared modules..."
+for f in \
+    __init__.py \
+    relay_control.py \
+    voltage_matching.py \
+    aggregate_driver.py \
+    lock.py \
+    dbus_monitor.py \
+    alerting.py \
+    temp_battery.py \
+    temp_battery_process.py \
+; do
+    wget -qO "${SHARED_DIR}/${f}" "${SHARED_URL}/${f}"
+    echo "  ${f}"
+done
+mkdir -p "${SHARED_DIR}/ext"
+ln -sfn /data/apps/dbus-aggregate-batteries/ext/velib_python "${SHARED_DIR}/ext/velib_python"
+echo "Shared modules installed to ${SHARED_DIR}"
 
 # Make executable
 chmod +x "${INSTALL_DIR}/fla_equalisation.py"
