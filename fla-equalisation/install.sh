@@ -26,7 +26,8 @@ chmod +x "${INSTALL_DIR}/fla_equalisation.py"
 
 # Symlink velib_python from aggregate batteries if available, else copy
 if [ -d "/data/apps/dbus-aggregate-batteries/ext/velib_python" ]; then
-    ln -sfn /data/apps/dbus-aggregate-batteries/ext/velib_python "${INSTALL_DIR}/ext"
+    mkdir -p "${INSTALL_DIR}/ext"
+    ln -sfn /data/apps/dbus-aggregate-batteries/ext/velib_python "${INSTALL_DIR}/ext/velib_python"
     echo "Linked velib_python from dbus-aggregate-batteries"
 else
     echo "ERROR: velib_python not found at /data/apps/dbus-aggregate-batteries/ext/velib_python"
