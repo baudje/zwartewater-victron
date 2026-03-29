@@ -201,10 +201,13 @@ def run_equalisation(settings, monitor, status):
             if i_trojan is not None and abs(i_trojan) > 60:
                 log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", abs(i_trojan))
 
-            if i_trojan is not None and abs(i_trojan) < settings.eq_current_complete:
+            # Only check current completion AFTER voltage reaches near target
+            # (within 0.5V of eq_voltage — ensures proper equalisation, not just a brief spike)
+            voltage_reached = v_trojan is not None and v_trojan >= (settings.eq_voltage - 0.5)
+            if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.eq_current_complete:
                 log.info(
-                    "Equalisation complete: current %.1fA < %.1fA threshold (%.0f min)",
-                    abs(i_trojan), settings.eq_current_complete, elapsed / 60,
+                    "Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA threshold (%.0f min)",
+                    v_trojan, settings.eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60,
                 )
                 break
 

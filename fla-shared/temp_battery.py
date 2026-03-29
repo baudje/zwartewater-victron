@@ -116,13 +116,23 @@ class TempBatteryService:
         log.info("CVL updated to %.2fV", voltage)
 
     def deregister(self):
-        """Remove the temporary service from D-Bus."""
+        """Remove the temporary service from D-Bus and release the bus name."""
         if not self._registered:
             return
         try:
             self._service["/Connected"] = 0
         except Exception as e:
-            log.warning("Error deregistering service: %s", e)
-        self._service = None  # Release reference so GC can collect
+            log.warning("Error setting Connected=0: %s", e)
+        try:
+            # Release the D-Bus name so other services don't see a stale registration
+            self._bus.release_name("com.victronenergy.battery.fla_equalisation")
+        except Exception as e:
+            log.warning("Error releasing D-Bus name: %s", e)
+        try:
+            self._bus.close()
+        except Exception as e:
+            log.warning("Error closing private bus: %s", e)
+        self._service = None
+        self._bus = None
         self._registered = False
         log.info("Temporary battery service deregistered")
