@@ -291,10 +291,12 @@ def run_charge(settings, monitor, status):
             if i_trojan is not None and abs(i_trojan) > 60:
                 log.warning("High Trojan charge current: %.1fA (dynamo/MPPT?)", abs(i_trojan))
 
-            # Absorption complete
-            if i_trojan is not None and abs(i_trojan) < settings.fla_absorption_complete_current:
-                log.info("Absorption complete: current %.1fA < %.1fA threshold (%.0f min)",
-                         abs(i_trojan), settings.fla_absorption_complete_current, elapsed / 60)
+            # Absorption complete — only after voltage reaches near target
+            voltage_reached = v_trojan is not None and v_trojan >= (settings.fla_bulk_voltage - 0.5)
+            if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.fla_absorption_complete_current:
+                log.info("Absorption complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
+                         v_trojan, settings.fla_bulk_voltage, abs(i_trojan),
+                         settings.fla_absorption_complete_current, elapsed / 60)
                 break
 
             if elapsed > abs_timeout:
