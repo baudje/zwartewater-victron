@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Victron Energy system optimisation for vessel Zwartewater (ENI: 03330190). Three deliverables:
+Victron Energy system optimisation for vessel Zwartewater (ENI: 03330190). Manages a hybrid parallel LFP + FLA battery system where LFP handles daily cycling and FLA acts as backup/buffer. Three deliverables:
 
-1. **config/** — Optimised `config.ini` for dbus-aggregate-batteries (2× EVE MB31 8s LFP + JK BMS)
+1. **config/** — Optimised `config.ini` for dbus-aggregate-batteries + `sb-config.ini` for dbus-serialbattery
 2. **fla-equalisation/** — Automated Trojan L16H-AC equalisation service on Venus OS (port 8088)
 3. **fla-charge/** — Automated Trojan FLA bulk+absorption charge service on Venus OS (port 8089)
 
@@ -37,7 +37,7 @@ Transitioning: temp/100 at 28.4V, relay closed (still safe for both banks)
 Disconnected: temp/100 at 28.4V, relay open, LFPs on Orion
     ↓ raise CVL to target (31.5V EQ or 29.64V absorption)
 Charging:     temp/100 at high voltage, relay open, only FLA charging
-    ↓ lower CVL to 27.0V float, wait for delta < 1V
+    ↓ set CVL to 27.0V float — relay closes when delta < 1V
 Reconnecting: close relay, restart aggregate
 ```
 
@@ -47,12 +47,17 @@ Reconnecting: close relay, restart aggregate
 
 `temp_battery_process.py` runs as a separate subprocess because the temp D-Bus battery service needs root path `/` which conflicts with the main status service. Parent communicates voltage changes via file `/tmp/fla_eq_cvl` (polled every 2s by subprocess).
 
+### D-Bus Service Names
+
+- Status services register as `com.victronenergy.fla_equalisation` / `com.victronenergy.fla_charge` (custom prefix — not visible on Device List but avoids introspection issues with `battery` or `genset` prefixes)
+- Web dashboards at ports 8088/8089 are the primary monitoring interface
+
 ### Shared Modules (`fla-shared/`)
 
 | Module | Purpose |
 |--------|---------|
 | `relay_control.py` | Open/close relay 2 with read-back verification, delta-aware cleanup, startup recovery |
-| `voltage_matching.py` | Convergence loop: polls delta every 30s, waits for < 1V |
+| `voltage_matching.py` | Sets CVL to float then polls delta every 30s; relay closes when < 1V |
 | `temp_battery.py` | Launches temp battery subprocess |
 | `temp_battery_process.py` | Standalone D-Bus battery service, reads SmartShunt Trojan, watches CVL file |
 | `temp_compensation.py` | Trojan temp compensation: ±0.005V/cell/°C (±0.06V/°C for 12 cells) |
@@ -74,10 +79,13 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 ## Key Design Decisions
 
 - JK BMS current is inaccurate → use `CURRENT_FROM_VICTRON = True` with SmartShunt LFP
+- `OWN_SOC = False` — serialbattery SoC resets at each daily charge cycle; own counter drifts
+- `OWN_CHARGE_PARAMETERS = False` — serialbattery controls Bulk/Absorption/Float transitions
 - Daily charge at 3.55V/cell, balancing at 3.60V/cell every 14 days
 - FLA equalisation at 31.5V every 90 days (Trojan datasheet max 32.4V, capped for safety), CCL 60A
 - FLA absorption at 29.64V when Trojan SoC < 85% (Trojan datasheet: 2.47V/cell × 12), CCL 60A
 - Voltage matching (delta < 1V) required before reconnecting LFP bank (limits inrush current)
+- Float reduction and voltage matching are one phase: `wait_for_match()` sets CVL to float then checks delta
 - Relay re-verified every 30s during high-voltage phases to catch external closes
 - Delta-aware cleanup: `finally` block only closes relay if delta < 1V; otherwise alarms and leaves LFPs on Orion
 - Temperature compensation adjusts all target voltages per Trojan datasheet (reads from JK BMS sensor)
@@ -86,8 +94,8 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 ## Testing
 
 ```bash
-# Run all tests (138 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 83 tests — shared modules
+# Run all tests (137 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 82 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 33 tests — EQ service
 python3 -m unittest discover -s fla-charge/tests -v        # 22 tests — charge service
 
@@ -98,14 +106,14 @@ python3 -m unittest fla-shared/tests/test_relay_control.py -v
 python3 -m unittest fla-equalisation.tests.test_fla_equalisation.TestScheduling.test_disabled_returns_false -v
 ```
 
-Tests mock D-Bus calls — no Venus OS required. Shared test helpers in `fla-shared/tests/helpers.py` (MockMonitor, MockStatus, dbus_mock_setup).
+Tests mock D-Bus calls — no Venus OS required. Shared test helpers in `fla-shared/tests/helpers.py` (MockMonitor, MockStatus, dbus_mock_setup). All service test files import from helpers — do not duplicate mock classes.
 
 ## Deployment
 
-### Config (Part A)
+### Config
 ```bash
-scp config/config.ini root@venus.local:/data/apps/dbus-aggregate-batteries/config.ini
-ssh root@venus.local /data/apps/dbus-aggregate-batteries/restart.sh
+sshpass -p 'Zwartewater' scp config/config.ini root@venus.local:/data/apps/dbus-aggregate-batteries/config.ini
+sshpass -p 'Zwartewater' ssh root@venus.local '/data/apps/dbus-aggregate-batteries/restart.sh'
 ```
 
 ### FLA Services (deploy via sshpass)
@@ -115,10 +123,12 @@ sshpass -p 'Zwartewater' scp fla-shared/*.py root@venus.local:/data/apps/fla-sha
 
 # EQ service
 sshpass -p 'Zwartewater' scp fla-equalisation/fla_equalisation.py fla-equalisation/settings.py \
+  fla-equalisation/dbus_status_service.py fla-equalisation/web_server.py \
   root@venus.local:/data/apps/fla-equalisation/
 
 # Charge service
-sshpass -p 'Zwartewater' scp fla-charge/fla_charge.py \
+sshpass -p 'Zwartewater' scp fla-charge/fla_charge.py fla-charge/settings.py \
+  fla-charge/dbus_status_service.py fla-charge/web_server.py \
   root@venus.local:/data/apps/fla-charge/
 
 # Restart both services
@@ -133,14 +143,15 @@ sshpass -p 'Zwartewater' ssh root@venus.local 'cd /data/apps/fla-charge && bash 
 
 ### Checking Logs on Cerbo
 ```bash
-sshpass -p 'Zwartewater' ssh root@venus.local 'tail -100 /var/log/fla-equalisation/current'
-sshpass -p 'Zwartewater' ssh root@venus.local 'tail -100 /var/log/fla-charge/current'
+sshpass -p 'Zwartewater' ssh root@venus.local 'tail -100 /data/log/fla-equalisation.log'
+sshpass -p 'Zwartewater' ssh root@venus.local 'tail -100 /data/log/fla-charge.log'
 ```
 
 ## References
 
 - Design spec: `docs/design.md`
 - State machine doc: `docs/state-machine.md`
+- Voltage diagrams: `docs/voltage-profiles.png`, `docs/charge-sequences.png` (regenerate with `python3 docs/generate_diagrams.py`)
 - Electrical schema: ScheepsArts, Zwartewater 20250526.pdf
 - EVE MB31 datasheet: PBRI-MB31-D06-01 (Nov 2023)
 - Upstream driver: https://github.com/Dr-Gigavolt/dbus-aggregate-batteries
