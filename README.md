@@ -42,7 +42,7 @@ Optimised [dbus-aggregate-batteries](https://github.com/Dr-Gigavolt/dbus-aggrega
 
 **Key settings:**
 - `CURRENT_FROM_VICTRON = True` — uses SmartShunt LFP instead of inaccurate JK BMS current
-- `OWN_CHARGE_PARAMETERS = True` — aggregate driver controls CVL/CCL/DCL
+- `OWN_CHARGE_PARAMETERS = False` — serialbattery controls charge cycle (Bulk/Absorption/Float)
 - Daily charge: 3.55V/cell (28.4V), balancing: 3.60V/cell every 14 days
 - Cell protection: max 3.65V, min 2.80V (EVE MB31 datasheet limits)
 - Current limits: 120A charge (Quattro limit), 150A discharge
@@ -225,10 +225,16 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 ## Testing
 
 ```bash
-python3 -m unittest fla-equalisation/tests/test_fla_equalisation.py -v
+# Run all tests (138 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 83 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 33 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 22 tests — charge service
+
+# Run a single test file
+python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-26 tests covering: scheduling logic, safety guards, crash safety, inrush protection, startup recovery, and settings validation.
+138 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver), EQ scheduling/safety/happy path/Orion failure detection, and charge scheduling/phase transitions/safety guards.
 
 ## Files
 
@@ -252,22 +258,24 @@ zwartewater-victron/
 |   +-- alerting.py                 # Buzzer + alarm
 |   +-- lock.py                     # Atomic file-based operation lock
 |   +-- aggregate_driver.py         # Start/stop aggregate batteries
+|   +-- tests/                      # 83 unit tests for shared modules
 +-- fla-equalisation/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
 |   +-- fla_equalisation.py         # Main EQ service
-|   +-- dbus_status_service.py      # D-Bus status for Cerbo GUI
+|   +-- dbus_status_service.py      # D-Bus status (com.victronenergy.battery.fla_equalisation)
 |   +-- settings.py                 # Venus OS settings integration
 |   +-- web_server.py               # Web dashboard (port 8088)
 |   +-- service/run                 # Daemontools service runner
-|   +-- tests/test_fla_equalisation.py
+|   +-- tests/                      # 33 unit tests
 +-- fla-charge/
     +-- install.sh                  # Venus OS installer
     +-- fla_charge.py               # Main charge service
-    +-- dbus_status_service.py      # D-Bus status for Cerbo GUI
+    +-- dbus_status_service.py      # D-Bus status (com.victronenergy.battery.fla_charge)
     +-- settings.py                 # Venus OS settings integration
     +-- web_server.py               # Web dashboard (port 8089)
     +-- service/run                 # Daemontools service runner
+    +-- tests/                      # 22 unit tests
 ```
 
 ## References
