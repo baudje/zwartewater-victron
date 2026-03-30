@@ -69,7 +69,7 @@ IGNORE_SMARTSHUNT_ABSENCE = True
 ### Own Charge Parameters
 
 ```ini
-OWN_CHARGE_PARAMETERS = True
+OWN_CHARGE_PARAMETERS = False
 
 CHARGE_VOLTAGE_LIST =
     3.55,   ; January
@@ -177,15 +177,15 @@ Automates periodic Trojan L16H-AC equalisation by:
 1. Stopping the aggregate battery driver (so its CVL doesn't constrain DVCC)
 2. Registering a temporary D-Bus battery service to control Quattro charge voltage
 3. Opening relay 2 to disconnect LFP direct path (Orion activates to maintain LFPs at safe voltage)
-4. Running equalisation at 31.2V
+4. Running equalisation at 31.5V
 5. Voltage matching before reconnecting
 6. Restarting the aggregate battery driver
 
 ### Trojan L16H-AC Equalisation Specs
 
 - 4x 6V in series = 24V bank, 435Ah
-- Equalisation voltage: 31.2V (2.6V/cell x 12 cells)
-- Equalisation complete: current drops below 8A
+- Equalisation voltage: 31.5V (2.625V/cell × 12 cells, mid-range of Trojan spec 2.58–2.70V/cell)
+- Equalisation complete: current drops below 10A
 - Max duration: 2.5 hours
 
 ### Scheduling
@@ -208,7 +208,7 @@ Automates periodic Trojan L16H-AC equalisation by:
     - This removes the LFP battery service from D-Bus so DVCC is no longer constrained by LFP CVL
  3. Register temporary battery service on D-Bus:
     - Service: com.victronenergy.battery (device instance 100)
-    - /Info/MaxChargeVoltage = 31.2
+    - /Info/MaxChargeVoltage = 31.5
     - /Info/MaxChargeCurrent = appropriate for Trojans
     - /Info/MaxDischargeCurrent = 0
     - /Dc/0/Voltage = live from SmartShunt Trojan (279)
@@ -217,11 +217,11 @@ Automates periodic Trojan L16H-AC equalisation by:
     - Direct LFP path breaks
     - Orion DC-DC activates automatically, charges LFPs at safe voltage
     - LFP BMS communication (CAN+USB) remains active
- 5. Quattro charges Trojans at 31.2V via temporary D-Bus service
+ 5. Quattro charges Trojans at 31.5V via temporary D-Bus service
  6. Monitor SmartShunt Trojan (279):
-    - Complete when current < 8A
+    - Complete when current < 10A
     - Timeout: 2.5 hours max
- 7. Temporary service reduces CVL to normal float (~27.6V)
+ 7. Temporary service reduces CVL to normal float (~27.0V)
  8. Wait for voltage convergence:
     - V_trojan from SmartShunt Trojan (279) /Dc/0/Voltage
     - V_lfp from SmartShunt LFP (277) /Dc/0/Voltage (fallback: dbus-serialbattery)
@@ -244,10 +244,10 @@ Equalisation parameters registered via `com.victronenergy.settings` on D-Bus, ac
 
 | Setting path | Default | Description |
 |-------------|---------|-------------|
-| `/Settings/FlaEqualisation/EqualisationVoltage` | 31.2 | Trojan equalisation voltage (V) |
-| `/Settings/FlaEqualisation/EqualisationCurrentComplete` | 8 | Current threshold for completion (A) |
+| `/Settings/FlaEqualisation/EqualisationVoltage` | 31.5 | Trojan equalisation voltage (V), 2.625V/cell |
+| `/Settings/FlaEqualisation/EqualisationCurrentComplete` | 10 | Current threshold for completion (A) |
 | `/Settings/FlaEqualisation/EqualisationTimeoutHours` | 2.5 | Max equalisation duration (hours) |
-| `/Settings/FlaEqualisation/FloatVoltage` | 27.6 | Normal float voltage after equalisation (V) |
+| `/Settings/FlaEqualisation/FloatVoltage` | 27.0 | Float voltage after equalisation (V), 2.25V/cell |
 | `/Settings/FlaEqualisation/VoltageDeltaMax` | 1.0 | Max voltage difference for reconnect (V) |
 | `/Settings/FlaEqualisation/VoltageMatchTimeoutHours` | 4 | Max wait for voltage convergence (hours) |
 | `/Settings/FlaEqualisation/DaysBetweenEqualisation` | 90 | Interval between equalisations (days) |
