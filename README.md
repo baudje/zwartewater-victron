@@ -21,12 +21,20 @@ When the LFPs are depleted (below ~10% SoC, approaching 2.8V/cell), their intern
 
 LFP and FLA can share a DC bus safely because their normal operating voltage ranges overlap. At the daily LFP charge target of 3.55V/cell (28.4V pack), the Trojans see approximately 2.37V/cell — above their float voltage (2.25V/cell) but well below their gassing threshold (2.47V/cell). The LFP bank cycles freely between 10% and 100% without pushing the FLA bank into harmful territory — the voltage window that corresponds to LFP daily use (roughly 26–28.4V) keeps the Trojans at or near 100% SoC — exactly where lead-acid is happiest.
 
+### Voltage Profiles
+
+![Voltage profiles](docs/voltage-profiles.png)
+
 **The problem this repo solves:**
 
 The parallel setup works well for daily cycling, but FLA batteries periodically need voltages that would destroy LFP cells:
 
 - **Absorption charge** at 29.64V (2.47V/cell FLA) — this is 3.71V/cell for the LFPs, above the 3.65V absolute max
 - **Equalisation** at 31.5V (2.625V/cell FLA) — this is 3.94V/cell for the LFPs, catastrophically above max
+
+### Charge and Equalisation Sequences
+
+![Charge sequences](docs/charge-sequences.png)
 
 The solution is temporary physical isolation: a relay disconnects the LFPs from the DC bus during high-voltage FLA charging, while an Orion DC-DC charger independently maintains the LFPs at a safe voltage. After the FLA charge completes, the system waits for the voltages to converge (delta < 1V) before reconnecting. This repo automates the entire sequence — scheduling, relay control, voltage management, convergence monitoring, and reconnection — with layered safety guards to protect against every failure mode identified during development.
 
