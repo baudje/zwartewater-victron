@@ -128,13 +128,8 @@ def _plot_sequence(ax, title, high_voltage, high_label,
     float_v = 27.0
     settle_v = 26.5  # Resting voltage after reconnect
 
-    # How long for Trojan to drop from high voltage to within 1V of LFP?
-    # Bigger drop = longer. Rough model: exponential decay.
-    drop_needed = high_voltage - (orion_v + 1.0)  # Drop until delta < 1V
-    # Time for Trojan to cross the 1V threshold (relative to float start)
+    # Time for Trojan to drop from high voltage to within 1V of LFP
     match_time = 0.8 * (high_voltage - orion_v)  # ~2h for absorption, ~3.5h for EQ
-
-    t_total = t_relay_open + t_charge_end + match_time + 1.5  # +1.5h for settle after reconnect
 
     # --- Charging phase (relay already open) ---
     if t_relay_open > 0:
