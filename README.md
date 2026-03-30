@@ -263,7 +263,7 @@ zwartewater-victron/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
 |   +-- fla_equalisation.py         # Main EQ service
-|   +-- dbus_status_service.py      # D-Bus status (com.victronenergy.battery.fla_equalisation)
+|   +-- dbus_status_service.py      # D-Bus status (com.victronenergy.genset.fla_equalisation)
 |   +-- settings.py                 # Venus OS settings integration
 |   +-- web_server.py               # Web dashboard (port 8088)
 |   +-- service/run                 # Daemontools service runner
@@ -271,7 +271,7 @@ zwartewater-victron/
 +-- fla-charge/
     +-- install.sh                  # Venus OS installer
     +-- fla_charge.py               # Main charge service
-    +-- dbus_status_service.py      # D-Bus status (com.victronenergy.battery.fla_charge)
+    +-- dbus_status_service.py      # D-Bus status (com.victronenergy.genset.fla_charge)
     +-- settings.py                 # Venus OS settings integration
     +-- web_server.py               # Web dashboard (port 8089)
     +-- service/run                 # Daemontools service runner
