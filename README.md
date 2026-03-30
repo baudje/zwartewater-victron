@@ -2,6 +2,28 @@
 
 Victron Energy system optimisation for vessel **Zwartewater** (ENI: 03330190).
 
+## Why Hybrid LFP + FLA?
+
+This vessel runs two battery chemistries in parallel on the same 24V DC bus: lithium iron phosphate (EVE MB31 LFP, 628Ah) and flooded lead-acid (Trojan L16H-AC FLA, 435Ah). This is uncommon because LFP and FLA have fundamentally different charge profiles — but on a liveaboard vessel, the combination makes practical sense.
+
+**What each chemistry brings:**
+
+- **LFP** is the workhorse. High round-trip efficiency (~98%), flat discharge curve, 8000+ cycle life, and high charge/discharge rates. It handles daily cycling — solar harvest, inverter loads, engine starting.
+- **FLA** provides ballast capacity and resilience. Lead-acid tolerates sustained low-SoC states that would damage LFP, survives abuse that would trip a BMS, and doesn't need a BMS to stay balanced. On a vessel with unpredictable shore power, the Trojans act as a buffer — absorbing excess solar, cushioning heavy loads, and keeping the DC bus alive if the BMS disconnects the LFPs.
+
+**Why parallel works (with constraints):**
+
+LFP and FLA can share a DC bus safely because their normal operating voltage ranges overlap. At the daily LFP charge target of 3.55V/cell (28.4V pack), the Trojans see approximately 2.37V/cell — above their float voltage (2.25V/cell) but well below their gassing threshold (2.47V/cell). Current distributes naturally based on internal resistance: the LFPs (lower impedance) absorb most charge current and deliver most discharge current, while the Trojans provide a stabilising baseload.
+
+**The problem this repo solves:**
+
+The parallel setup works well for daily cycling, but FLA batteries periodically need voltages that would destroy LFP cells:
+
+- **Absorption charge** at 29.64V (2.47V/cell FLA) — this is 3.71V/cell for the LFPs, above the 3.65V absolute max
+- **Equalisation** at 31.5V (2.625V/cell FLA) — this is 3.94V/cell for the LFPs, catastrophically above max
+
+The solution is temporary physical isolation: a relay disconnects the LFPs from the DC bus during high-voltage FLA charging, while an Orion DC-DC charger independently maintains the LFPs at a safe voltage. After the FLA charge completes, the system waits for the voltages to converge (delta < 1V) before reconnecting. This repo automates the entire sequence — scheduling, relay control, voltage management, convergence monitoring, and reconnection — with layered safety guards to protect against every failure mode identified during development.
+
 ## System Overview
 
 | Component | Model | Details |
