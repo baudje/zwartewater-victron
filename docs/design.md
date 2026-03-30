@@ -260,7 +260,7 @@ Equalisation parameters registered via `com.victronenergy.settings` on D-Bus, ac
 
 ### D-Bus Service for Cerbo GUI Visibility
 
-The script registers `com.victronenergy.genset.fla_equalisation` exposing:
+The script registers `com.victronenergy.fla_equalisation` exposing:
 
 | Path | Description |
 |------|-------------|
