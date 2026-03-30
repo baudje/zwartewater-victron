@@ -8,12 +8,18 @@ This vessel runs two battery chemistries in parallel on the same 24V DC bus: lit
 
 **What each chemistry brings:**
 
-- **LFP** is the workhorse. High round-trip efficiency (~98%), flat discharge curve, 8000+ cycle life, and high charge/discharge rates. It handles daily cycling — solar harvest, inverter loads, engine starting.
-- **FLA** provides ballast capacity and resilience. Lead-acid tolerates sustained low-SoC states that would damage LFP, survives abuse that would trip a BMS, and doesn't need a BMS to stay balanced. On a vessel with unpredictable shore power, the Trojans act as a buffer — absorbing excess solar, cushioning heavy loads, and keeping the DC bus alive if the BMS disconnects the LFPs.
+- **LFP** is the workhorse. High round-trip efficiency (~98%), flat discharge curve, 8000+ cycle life, and high charge/discharge rates. LFP thrives on cycling — it can operate between 10% and 100% SoC daily without degradation. It handles solar harvest, inverter loads, and engine starting.
+- **FLA** is the backup and buffer. Lead-acid prefers to sit near 100% SoC and should not be discharged below ~40%, but it doesn't need a BMS to stay balanced and can't be hard-disconnected by protection electronics. On a vessel with unpredictable shore power, the Trojans absorb excess solar, cushion heavy transient loads, and — critically — keep the DC bus alive if the LFP BMS disconnects.
+
+**How the two chemistries support each other:**
+
+During normal cycling, the LFPs do virtually all the work. Their lower impedance means they absorb most charge current and deliver most discharge current, while the Trojans float near the top of their charge range — exactly where lead-acid wants to be. The FLA bank barely cycles during normal use, which maximises its lifespan.
+
+When the LFPs are depleted (below ~10% SoC, approaching 2.8V/cell), their internal resistance rises and the FLA bank naturally starts taking over discharge duty. If the BMS disconnects the LFPs entirely (cell undervoltage protection), the Trojans keep the DC bus alive — lights stay on, the fridge keeps running, and the Quattro can still charge from shore power or generator to bring everything back up.
 
 **Why parallel works (with constraints):**
 
-LFP and FLA can share a DC bus safely because their normal operating voltage ranges overlap. At the daily LFP charge target of 3.55V/cell (28.4V pack), the Trojans see approximately 2.37V/cell — above their float voltage (2.25V/cell) but well below their gassing threshold (2.47V/cell). Current distributes naturally based on internal resistance: the LFPs (lower impedance) absorb most charge current and deliver most discharge current, while the Trojans provide a stabilising baseload.
+LFP and FLA can share a DC bus safely because their normal operating voltage ranges overlap. At the daily LFP charge target of 3.55V/cell (28.4V pack), the Trojans see approximately 2.37V/cell — above their float voltage (2.25V/cell) but well below their gassing threshold (2.47V/cell). The LFP bank cycles freely between 10% and 100% without pushing the FLA bank into harmful territory — the voltage window that corresponds to LFP daily use (roughly 26–28.4V) keeps the Trojans comfortably between 50% and 100% SoC.
 
 **The problem this repo solves:**
 
