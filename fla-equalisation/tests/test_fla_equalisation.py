@@ -78,6 +78,7 @@ class MockMonitor:
         self._trojan_current = kwargs.get('trojan_current', 20.0)
         self._lfp_soc = kwargs.get('lfp_soc', 96.0)
         self._relay_state = kwargs.get('relay_state', 1)
+        self._battery_temp = kwargs.get('battery_temp', 25.0)
         self._relay_set_calls = []
         self._invalidated = False
 
@@ -118,6 +119,9 @@ class MockMonitor:
 
     def get_trojan_soc(self):
         return 85.0
+
+    def get_battery_temperature(self):
+        return self._battery_temp
 
     def invalidate_services(self):
         self._invalidated = True
@@ -421,6 +425,278 @@ class TestSettings(unittest.TestCase):
         fla_cells = 12
         per_cell = eq_v / fla_cells
         self.assertAlmostEqual(per_cell, 2.625, places=2)
+
+
+class TestRunEqualisationHappyPath(unittest.TestCase):
+    """Test successful full equalisation sequence."""
+
+    def _make_mocks(self, **monitor_kwargs):
+        settings = MockSettings()
+        monitor = MockMonitor(**monitor_kwargs)
+        status = MockStatus()
+        return settings, monitor, status
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.clear_alarm')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_full_success_returns_true(self, mock_time, mock_cache, mock_clear,
+                                       mock_write_eq, mock_match, mock_delta_close,
+                                       mock_close, mock_relay_check, mock_verify,
+                                       mock_open, mock_start, mock_stop,
+                                       mock_lock, mock_unlock):
+        """Full EQ sequence with all steps succeeding returns True."""
+        # EQ loop: first iteration sees current below threshold → complete
+        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(
+            trojan_voltage=31.5, trojan_current=5.0,  # Below eq_current_complete=10
+            lfp_voltage=28.0,
+        )
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            result = run_equalisation(settings, monitor, status)
+        self.assertTrue(result)
+        mock_write_eq.assert_called_once()
+        mock_clear.assert_called_once()
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.clear_alarm')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_state_transitions_in_order(self, mock_time, mock_cache, mock_clear,
+                                         mock_write_eq, mock_match, mock_delta_close,
+                                         mock_close, mock_relay_check, mock_verify,
+                                         mock_open, mock_start, mock_stop,
+                                         mock_lock, mock_unlock):
+        """States should progress through full sequence."""
+        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(
+            trojan_voltage=31.5, trojan_current=5.0, lfp_voltage=28.0,
+        )
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            run_equalisation(settings, monitor, status)
+        expected_order = [
+            STATE_STOPPING_DRIVER, STATE_DISCONNECTING, STATE_EQUALISING,
+            STATE_VOLTAGE_MATCHING, STATE_RECONNECTING, STATE_RESTARTING_DRIVER,
+            STATE_IDLE,
+        ]
+        self.assertEqual(status.states, expected_order)
+
+
+class TestOrionFailureDetection(unittest.TestCase):
+    """Test CRIT-3: Orion DC-DC failure detection during equalisation."""
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_lfp_voltage_drop_triggers_alarm(self, mock_time, mock_cache, mock_delta_close,
+                                              mock_relay_check, mock_verify, mock_open,
+                                              mock_start, mock_stop, mock_lock, mock_unlock):
+        """LFP voltage dropping > 0.5V from disconnect indicates Orion failure."""
+        mock_time.time.side_effect = [0, 5, 10, 15]
+        mock_time.sleep = MagicMock()
+        monitor = MockMonitor(
+            trojan_voltage=29.0, trojan_current=30.0,
+            lfp_voltage=27.3,  # disconnect will record 27.3, then it drops below 26.8
+        )
+        # After disconnect, LFP voltage drops
+        call_count = [0]
+        def lfp_v_dropping():
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                return 27.3  # At disconnect
+            return 26.5  # Dropped > 0.5V → Orion failure
+        monitor.get_lfp_voltage = lfp_v_dropping
+
+        settings = MockSettings()
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            result = run_equalisation(settings, monitor, status)
+        self.assertFalse(result)
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.clear_alarm')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_lfp_voltage_stable_no_alarm(self, mock_time, mock_cache, mock_clear,
+                                          mock_write_eq, mock_match, mock_delta_close,
+                                          mock_close, mock_relay_check, mock_verify,
+                                          mock_open, mock_start, mock_stop,
+                                          mock_lock, mock_unlock):
+        """LFP voltage stable (within 0.3V) should not trigger Orion alarm."""
+        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.sleep = MagicMock()
+        monitor = MockMonitor(
+            trojan_voltage=31.5, trojan_current=5.0,
+            lfp_voltage=27.7,  # Stable — within 0.5V of disconnect voltage
+        )
+        settings = MockSettings()
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            result = run_equalisation(settings, monitor, status)
+        self.assertTrue(result)
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.clear_alarm')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_lfp_voltage_none_no_false_alarm(self, mock_time, mock_cache, mock_clear,
+                                              mock_write_eq, mock_match, mock_delta_close,
+                                              mock_close, mock_relay_check, mock_verify,
+                                              mock_open, mock_start, mock_stop,
+                                              mock_lock, mock_unlock):
+        """LFP voltage=None should not trigger false Orion alarm."""
+        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.sleep = MagicMock()
+        # First call returns value (at disconnect), subsequent calls return None
+        call_count = [0]
+        def lfp_v_goes_none():
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                return 28.0
+            return None
+        monitor = MockMonitor(
+            trojan_voltage=31.5, trojan_current=5.0,
+        )
+        monitor.get_lfp_voltage = lfp_v_goes_none
+        settings = MockSettings()
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            result = run_equalisation(settings, monitor, status)
+        # Should still succeed — None doesn't trigger the Orion check
+        self.assertTrue(result)
+
+
+class TestTempCompensationIntegration(unittest.TestCase):
+    """Test temperature compensation applied during equalisation."""
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.clear_alarm')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_cold_temp_raises_cvl(self, mock_time, mock_cache, mock_clear,
+                                   mock_write_eq, mock_match, mock_delta_close,
+                                   mock_close, mock_relay_check, mock_verify,
+                                   mock_open, mock_start, mock_stop,
+                                   mock_lock, mock_unlock):
+        """At 15°C, temperature compensation should raise CVL above base."""
+        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.sleep = MagicMock()
+        monitor = MockMonitor(
+            trojan_voltage=32.1, trojan_current=5.0,  # At compensated voltage
+            lfp_voltage=28.0, battery_temp=15.0,
+        )
+        settings = MockSettings()
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            MockTBS.return_value = mock_tbs
+            run_equalisation(settings, monitor, status)
+        # temp_compensate(31.5, 15.0) = 31.5 + 0.6 = 32.1
+        # set_charge_voltage should be called with 32.1
+        cvl_calls = [c for c in mock_tbs.set_charge_voltage.call_args_list]
+        self.assertTrue(any(abs(c[0][0] - 32.1) < 0.01 for c in cvl_calls),
+                        f"Expected CVL ~32.1, got calls: {cvl_calls}")
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.verify_relay_still_open', return_value=True)
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.clear_alarm')
+    @patch('fla_equalisation.update_cache')
+    @patch('fla_equalisation.time')
+    def test_none_temp_uses_base_voltage(self, mock_time, mock_cache, mock_clear,
+                                          mock_write_eq, mock_match, mock_delta_close,
+                                          mock_close, mock_relay_check, mock_verify,
+                                          mock_open, mock_start, mock_stop,
+                                          mock_lock, mock_unlock):
+        """No temperature reading should use base eq_voltage unchanged."""
+        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.sleep = MagicMock()
+        monitor = MockMonitor(
+            trojan_voltage=31.5, trojan_current=5.0,
+            lfp_voltage=28.0, battery_temp=None,
+        )
+        settings = MockSettings()
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            MockTBS.return_value = mock_tbs
+            run_equalisation(settings, monitor, status)
+        # temp_compensate(31.5, None) = 31.5 unchanged
+        cvl_calls = [c for c in mock_tbs.set_charge_voltage.call_args_list]
+        self.assertTrue(any(abs(c[0][0] - 31.5) < 0.01 for c in cvl_calls),
+                        f"Expected CVL ~31.5, got calls: {cvl_calls}")
 
 
 if __name__ == '__main__':
