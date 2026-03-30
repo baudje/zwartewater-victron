@@ -133,7 +133,7 @@ BATTERY_EFFICIENCY = 0.98
 ### SoC
 
 ```ini
-OWN_SOC = True
+OWN_SOC = False
 ZERO_SOC = False
 CHARGE_SAVE_PRECISION = 0.0025
 MAX_CELL_VOLTAGE_SOC_FULL = 3.55
@@ -141,7 +141,8 @@ MIN_CELL_VOLTAGE_SOC_EMPTY = 2.80
 ```
 
 **Rationale:**
-- Own coulomb counter with SmartShunt precision, not JK BMS SoC
+- Uses serialbattery SoC (resets to 100% each charge cycle at SOC_RESET_CELL_VOLTAGE=3.55V)
+- OWN_SOC=True added a redundant coulomb counter that drifted from SmartShunt SoC
 - SOC full resets at 3.55V (daily charge voltage)
 - SOC empty aligned with MIN_CELL_VOLTAGE
 
@@ -259,7 +260,7 @@ Equalisation parameters registered via `com.victronenergy.settings` on D-Bus, ac
 
 ### D-Bus Service for Cerbo GUI Visibility
 
-The script registers `com.victronenergy.fla_equalisation` exposing:
+The script registers `com.victronenergy.battery.fla_equalisation` exposing:
 
 | Path | Description |
 |------|-------------|
