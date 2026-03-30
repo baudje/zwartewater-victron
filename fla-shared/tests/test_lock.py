@@ -4,7 +4,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import lock
 
 
-class TestAcquire(unittest.TestCase):
+class LockTestBase(unittest.TestCase):
+    """Shared setUp/tearDown for lock tests — creates temp dir, patches LOCK_FILE."""
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -17,6 +18,9 @@ class TestAcquire(unittest.TestCase):
         if os.path.exists(self.lock_file):
             os.unlink(self.lock_file)
         os.rmdir(self.tmpdir)
+
+
+class TestAcquire(LockTestBase):
 
     def test_acquire_returns_true_on_success(self):
         self.assertTrue(lock.acquire('fla-equalisation'))
@@ -31,7 +35,6 @@ class TestAcquire(unittest.TestCase):
         self.assertIn('started', data)
 
     def test_acquire_returns_false_when_held_by_live_process(self):
-        # Write a lock with our own (live) PID
         info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': os.getpid()})
         with open(self.lock_file, 'w') as f:
             f.write(info)
@@ -45,7 +48,6 @@ class TestAcquire(unittest.TestCase):
             self.assertTrue(lock.acquire('fla-equalisation'))
 
     def test_acquire_handles_file_exists_race(self):
-        # Simulate a race: stale check passes, but another process creates file before us
         with patch('os.open', side_effect=FileExistsError):
             self.assertFalse(lock.acquire('fla-equalisation'))
 
@@ -59,19 +61,7 @@ class TestAcquire(unittest.TestCase):
         self.assertTrue(lock.acquire('fla-equalisation'))
 
 
-class TestRelease(unittest.TestCase):
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.lock_file = os.path.join(self.tmpdir, 'operation.lock')
-        self.patcher = patch.object(lock, 'LOCK_FILE', self.lock_file)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        if os.path.exists(self.lock_file):
-            os.unlink(self.lock_file)
-        os.rmdir(self.tmpdir)
+class TestRelease(LockTestBase):
 
     def test_release_removes_lock_file(self):
         lock.acquire('fla-equalisation')
@@ -80,23 +70,10 @@ class TestRelease(unittest.TestCase):
         self.assertFalse(os.path.exists(self.lock_file))
 
     def test_release_no_error_on_nonexistent_file(self):
-        # Should not raise even if file doesn't exist
         lock.release()
 
 
-class TestIsLocked(unittest.TestCase):
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.lock_file = os.path.join(self.tmpdir, 'operation.lock')
-        self.patcher = patch.object(lock, 'LOCK_FILE', self.lock_file)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        if os.path.exists(self.lock_file):
-            os.unlink(self.lock_file)
-        os.rmdir(self.tmpdir)
+class TestIsLocked(LockTestBase):
 
     def test_no_file_returns_false(self):
         self.assertFalse(lock.is_locked())
@@ -120,19 +97,7 @@ class TestIsLocked(unittest.TestCase):
         self.assertFalse(lock.is_locked())
 
 
-class TestHolder(unittest.TestCase):
-
-    def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.lock_file = os.path.join(self.tmpdir, 'operation.lock')
-        self.patcher = patch.object(lock, 'LOCK_FILE', self.lock_file)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        if os.path.exists(self.lock_file):
-            os.unlink(self.lock_file)
-        os.rmdir(self.tmpdir)
+class TestHolder(LockTestBase):
 
     def test_no_file_returns_empty_dict(self):
         self.assertEqual(lock.holder(), {})

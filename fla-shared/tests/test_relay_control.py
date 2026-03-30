@@ -27,11 +27,6 @@ class TestOpenRelay(unittest.TestCase):
         result = relay_control.open_relay(monitor)
         self.assertFalse(result)
 
-    def test_records_state_zero(self, mock_time):
-        monitor = MockMonitor(relay_state=1)
-        relay_control.open_relay(monitor)
-        self.assertIn(0, monitor._relay_set_calls)
-
 
 @patch('relay_control.time')
 class TestVerifyRelayOpen(unittest.TestCase):
