@@ -50,7 +50,7 @@ class StatusService:
     def __init__(self):
         self._bus = get_bus()
         self._service = VeDbusService(
-            "com.victronenergy.genset.fla_charge", self._bus, register=False)
+            "com.victronenergy.fla_charge", self._bus, register=False)
         self._registered = False
 
     def register(self):
