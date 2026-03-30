@@ -1,6 +1,6 @@
-# Zwartewater Victron
+# Victron Hybrid LFP-FLA Management Service
 
-Victron Energy system optimisation for vessel **Zwartewater** (ENI: 03330190).
+Victron Energy system optimisation for vessel **Zwartewater**.
 
 ## Why Hybrid LFP + FLA?
 
