@@ -19,7 +19,7 @@ When the LFPs are depleted (below ~10% SoC, approaching 2.8V/cell), their intern
 
 **Why parallel works (with constraints):**
 
-LFP and FLA can share a DC bus safely because their normal operating voltage ranges overlap. At the daily LFP charge target of 3.55V/cell (28.4V pack), the Trojans see approximately 2.37V/cell — above their float voltage (2.25V/cell) but well below their gassing threshold (2.47V/cell). The LFP bank cycles freely between 10% and 100% without pushing the FLA bank into harmful territory — the voltage window that corresponds to LFP daily use (roughly 26–28.4V) keeps the Trojans comfortably between 50% and 100% SoC.
+LFP and FLA can share a DC bus safely because their normal operating voltage ranges overlap. At the daily LFP charge target of 3.55V/cell (28.4V pack), the Trojans see approximately 2.37V/cell — above their float voltage (2.25V/cell) but well below their gassing threshold (2.47V/cell). The LFP bank cycles freely between 10% and 100% without pushing the FLA bank into harmful territory — the voltage window that corresponds to LFP daily use (roughly 26–28.4V) keeps the Trojans at or near 100% SoC — exactly where lead-acid is happiest.
 
 **The problem this repo solves:**
 
