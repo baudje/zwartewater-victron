@@ -202,10 +202,11 @@ def _plot_sequence(ax, title, high_voltage, high_label,
     ax.text(t_reconnect - 0.3, (v_cross + orion_v) / 2, '~1V',
             fontsize=9, color='#2e7d32', fontweight='bold', ha='right', va='center')
 
-    # After reconnect: both settle to same resting voltage
+    # After reconnect: voltages converge — Trojan drops, LFP rises, meet in middle
+    equilibrium_v = (v_cross + orion_v) / 2  # They meet halfway
     t_settle = np.linspace(t_reconnect, t_reconnect + 1.5, 30)
-    v_trojan_settle = v_cross + (settle_v - v_cross) * (1 - np.exp(-(t_settle - t_reconnect) / 0.3))
-    v_lfp_settle = orion_v + (settle_v - orion_v) * (1 - np.exp(-(t_settle - t_reconnect) / 0.3))
+    v_trojan_settle = equilibrium_v + (v_cross - equilibrium_v) * np.exp(-(t_settle - t_reconnect) / 0.15)
+    v_lfp_settle = equilibrium_v + (orion_v - equilibrium_v) * np.exp(-(t_settle - t_reconnect) / 0.15)
 
     ax.plot(t_settle, v_trojan_settle, color='#FF9800', linewidth=2)
     ax.plot(t_settle, v_lfp_settle, color='#2196F3', linewidth=2)
