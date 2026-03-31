@@ -112,11 +112,19 @@ class TestScheduling(unittest.TestCase):
             self.assertTrue(should_run(self.settings, self.monitor))
         self.assertTrue(self.settings._cleared_run_now)
 
-    def test_run_now_still_enforces_soc(self):
+    def test_run_now_not_consumed_when_soc_too_low(self):
+        """RunNow should NOT be cleared if SoC gate fails — preserves operator intent."""
         self.settings.run_now = True
         self.monitor._lfp_soc = 80.0  # Below 95%
         self.assertFalse(should_run(self.settings, self.monitor))
-        self.assertTrue(self.settings._cleared_run_now)
+        self.assertFalse(self.settings._cleared_run_now)
+
+    def test_run_now_not_consumed_when_soc_none(self):
+        """RunNow should NOT be cleared if SoC is unreadable."""
+        self.settings.run_now = True
+        self.monitor._lfp_soc = None
+        self.assertFalse(should_run(self.settings, self.monitor))
+        self.assertFalse(self.settings._cleared_run_now)
 
 
 class TestDaysUntilNext(unittest.TestCase):
