@@ -133,6 +133,28 @@ class TestCloseRelayDeltaAware(unittest.TestCase):
         self.assertEqual(monitor._relay_set_calls, [])
         alerting_mod.raise_alarm.assert_called_once()
 
+    def test_set_relay_failure_raises_alarm(self, mock_time):
+        """If set_relay(1) fails, should alarm, not silently leave relay open."""
+        monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
+        monitor.set_relay = lambda state: False
+        alerting_mod = MagicMock()
+        status = MockStatus()
+        relay_control.close_relay_delta_aware(monitor, alerting_mod=alerting_mod, status=status)
+        alerting_mod.raise_alarm.assert_called_once()
+
+    def test_readback_failure_raises_alarm(self, mock_time):
+        """If relay read-back still shows open after close, should alarm."""
+        monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
+        # set_relay succeeds but state doesn't change
+        def set_relay_no_change(state):
+            monitor._relay_set_calls.append(state)
+            return True  # Command accepted but relay didn't move
+        monitor.set_relay = set_relay_no_change
+        alerting_mod = MagicMock()
+        status = MockStatus()
+        relay_control.close_relay_delta_aware(monitor, alerting_mod=alerting_mod, status=status)
+        alerting_mod.raise_alarm.assert_called_once()
+
     def test_no_alerting_mod_no_crash(self, mock_time):
         monitor = MockMonitor(relay_state=0, trojan_voltage=28.5, lfp_voltage=27.0)
         # Should not raise even without alerting_mod/status
@@ -207,6 +229,27 @@ class TestStartupSafetyCheck(unittest.TestCase):
         monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
         relay_control.startup_safety_check(monitor)
         mock_time.sleep.assert_called_with(3)
+
+    def test_set_relay_failure_raises_alarm(self, mock_time):
+        """If set_relay(1) fails at startup, should alarm."""
+        monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
+        monitor.set_relay = lambda state: False
+        alerting_mod = MagicMock()
+        status = MockStatus()
+        relay_control.startup_safety_check(monitor, status=status, alerting_mod=alerting_mod)
+        alerting_mod.raise_alarm.assert_called_once()
+
+    def test_readback_failure_raises_alarm(self, mock_time):
+        """If relay read-back still open after startup close, should alarm."""
+        monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
+        def set_relay_no_change(state):
+            monitor._relay_set_calls.append(state)
+            return True
+        monitor.set_relay = set_relay_no_change
+        alerting_mod = MagicMock()
+        status = MockStatus()
+        relay_control.startup_safety_check(monitor, status=status, alerting_mod=alerting_mod)
+        alerting_mod.raise_alarm.assert_called_once()
 
 
 if __name__ == '__main__':

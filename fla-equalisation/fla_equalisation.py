@@ -354,6 +354,7 @@ class FlaEqualisationService:
         self.status = StatusService()
         self.status.register()
         self._running = False
+        self._failed = False
         self._startup_safety_check()
         self._update_idle_status()
         log.info("FLA equalisation service started — checking every %ds", CHECK_INTERVAL_SEC)
@@ -426,11 +427,13 @@ class FlaEqualisationService:
             if check_run_now():
                 self.settings._write("run_now", 1)
 
-            # Update idle status with live voltages
-            self._update_idle_status()
+            # Don't overwrite error state on subsequent ticks
+            if not self._failed:
+                self._update_idle_status()
 
             if should_run(self.settings, self.monitor):
                 self._running = True
+                self._failed = False
                 _cache["run_now_requested"] = False  # CRIT-5: Clear flag after eq starts
                 success = False
                 try:
@@ -439,16 +442,12 @@ class FlaEqualisationService:
                         log.info("Equalisation run completed successfully")
                     else:
                         log.error("Equalisation run failed — check alarms")
+                        self._failed = True
                 finally:
                     self._running = False
                     if success:
+                        self._failed = False
                         self._update_idle_status()
-                    else:
-                        # Preserve error state — only update live voltages
-                        update_cache(
-                            trojan_v=self.monitor.get_trojan_voltage(),
-                            lfp_v=self.monitor.get_lfp_voltage(),
-                        )
 
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
