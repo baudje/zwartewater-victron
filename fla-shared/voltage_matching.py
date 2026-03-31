@@ -66,7 +66,7 @@ def wait_for_match(monitor, temp_service, status, alerting_mod,
                 cache_callback(trojan_v=v_trojan, lfp_v=v_lfp,
                                voltage_delta=delta, time_remaining=remaining)
 
-            if delta < voltage_delta_max:
+            if delta <= voltage_delta_max:
                 log.info("Voltage converged: Trojan=%.2fV, LFP=%.2fV, delta=%.2fV",
                          v_trojan, v_lfp, delta)
                 return True, delta

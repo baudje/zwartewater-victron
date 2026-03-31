@@ -41,10 +41,11 @@ class TestVerifyRelayOpen(unittest.TestCase):
         result = relay_control.verify_relay_open(monitor)
         self.assertFalse(result)
 
-    def test_none_current_passes(self, mock_time):
+    def test_none_current_fails(self, mock_time):
+        """Unreadable LFP current should fail — can't verify disconnection."""
         monitor = MockMonitor(lfp_current=None)
         result = relay_control.verify_relay_open(monitor)
-        self.assertTrue(result)
+        self.assertFalse(result)
 
     def test_sleep_called(self, mock_time):
         monitor = MockMonitor(lfp_current=0.0)
@@ -202,6 +203,12 @@ class TestStartupSafetyCheck(unittest.TestCase):
 
     def test_open_safe_delta_closes(self, mock_time):
         monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
+        relay_control.startup_safety_check(monitor)
+        self.assertIn(1, monitor._relay_set_calls)
+
+    def test_open_exact_boundary_closes(self, mock_time):
+        """Delta exactly 1.0V should auto-close (consistent with close_relay_delta_aware)."""
+        monitor = MockMonitor(relay_state=0, trojan_voltage=28.0, lfp_voltage=27.0)
         relay_control.startup_safety_check(monitor)
         self.assertIn(1, monitor._relay_set_calls)
 

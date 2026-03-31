@@ -204,8 +204,8 @@ def run_equalisation(settings, monitor, status):
                 raise_alarm("SmartShunt Trojan (279) unresponsive during equalisation", status_service=status)
                 return False
 
-            # Verify relay still open — external close at 31.5V would damage LFPs
-            if not verify_relay_still_open(monitor, settings.eq_voltage):
+            # Verify relay still open — external close at compensated CVL would damage LFPs
+            if not verify_relay_still_open(monitor, eq_voltage):
                 status.update(state=STATE_ERROR)
                 raise_alarm("Relay closed externally during EQ — aborting", status_service=status)
                 return False
