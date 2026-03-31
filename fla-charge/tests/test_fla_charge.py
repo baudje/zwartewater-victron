@@ -265,6 +265,7 @@ class TestRunChargeSafety(unittest.TestCase):
             with patch('fla_charge.update_cache'):
                 result = run_charge(settings, monitor, status)
         self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
 
     @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
@@ -392,6 +393,7 @@ class TestPhase1Transitions(unittest.TestCase):
         # Should have entered Phase 1 but not Phase 2
         self.assertIn(STATE_PHASE1_SHARED, status.states)
         self.assertNotIn(STATE_STOPPING_DRIVER, status.states)
+        self.assertIn(STATE_ERROR, status.states)
 
     @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
@@ -400,7 +402,7 @@ class TestPhase1Transitions(unittest.TestCase):
     @patch('fla_charge.time')
     def test_phase1_ac_loss_returns_false(self, mock_time, mock_cell_v, mock_ac,
                                           mock_lock, mock_unlock):
-        """AC input lost during Phase 1 should abort."""
+        """AC input lost during Phase 1 should abort with STATE_ERROR."""
         mock_time.time.side_effect = [0, 5]
         mock_time.sleep = MagicMock()
         mock_ac.return_value = False  # AC lost in loop
@@ -410,6 +412,7 @@ class TestPhase1Transitions(unittest.TestCase):
         with patch('fla_charge.update_cache'):
             result = run_charge(settings, monitor, status)
         self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
 
 
     @patch('fla_charge.release_lock')

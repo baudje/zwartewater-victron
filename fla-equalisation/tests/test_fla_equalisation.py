@@ -459,6 +459,7 @@ class TestOrionFailureDetection(unittest.TestCase):
             MockTBS.return_value = MagicMock()
             result = run_equalisation(settings, monitor, status)
         self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
