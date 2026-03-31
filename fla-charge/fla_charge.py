@@ -184,6 +184,7 @@ def run_charge(settings, monitor, status):
             # Check AC still available
             if not is_ac_available(monitor):
                 log.warning("AC input lost during Phase 1 — aborting")
+                status.update(state=STATE_ERROR)
                 return False
 
             # Transition triggers (any)
@@ -201,6 +202,7 @@ def run_charge(settings, monitor, status):
 
             if elapsed > phase1_timeout:
                 log.warning("Phase 1 timeout after %.0f hours — aborting", elapsed / 3600)
+                status.update(state=STATE_ERROR)
                 return False
 
             if int(elapsed) % 300 < 30:
@@ -304,6 +306,7 @@ def run_charge(settings, monitor, status):
             # Orion failure detection
             if (lfp_voltage_at_disconnect is not None and v_lfp is not None
                     and v_lfp < lfp_voltage_at_disconnect - 0.5):
+                status.update(state=STATE_ERROR)
                 alerting.raise_alarm("LFP voltage dropping — Orion may have failed", status_service=status)
                 return False
 
@@ -357,10 +360,12 @@ def run_charge(settings, monitor, status):
             cache_callback=_vm_cache_cb,
         )
         if not matched:
+            status.update(state=STATE_ERROR)
             return False
 
         status.update(state=STATE_RECONNECTING)
         if not close_relay_verified(monitor):
+            status.update(state=STATE_ERROR)
             alerting.raise_alarm("Failed to close relay 2", status_service=status)
             return False
 
@@ -380,6 +385,7 @@ def run_charge(settings, monitor, status):
 
         status.update(state=STATE_RESTARTING_DRIVER)
         if not start_aggregate():
+            status.update(state=STATE_ERROR)
             alerting.raise_alarm("Failed to restart aggregate driver", status_service=status)
             return False
         monitor.invalidate_services()
@@ -392,6 +398,7 @@ def run_charge(settings, monitor, status):
 
     except Exception as e:
         log.exception("Unexpected error: %s", e)
+        status.update(state=STATE_ERROR)
         alerting.raise_alarm("FLA charge error: %s" % e, status_service=status)
         return False
 
