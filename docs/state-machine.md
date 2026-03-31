@@ -81,7 +81,7 @@ EQ mode:      ActiveBattery = temp/100 at 31.5V, Relay2 = open, Orion active
     v (equalisation complete, CVL reduced to 27.0V float, voltage matching)
 Matching:     ActiveBattery = temp/100 at 27.0V, Relay2 = open
     |
-    v (voltage delta < 1V, relay closes, verified via read-back)
+    v (voltage delta <= 1V, relay closes, verified via read-back)
 Reconnected:  ActiveBattery = temp/100 at 27.0V, Relay2 = closed, inrush measured
     |
     v (temp service deregistered, aggregate driver restarted)
@@ -143,7 +143,9 @@ Startup ──> Searching ──> Running ──> (stopped by FLA equaliser)
                                     Restarted (svc -u) ──> Searching ──> Running
 ```
 
-**Charge parameter state machine (OWN_CHARGE_PARAMETERS = True):**
+**Charge parameter state machine (OWN_CHARGE_PARAMETERS = False, serialbattery controls CVL):**
+
+Note: The settings below are defined in config.ini but only active when `OWN_CHARGE_PARAMETERS = True`. Currently inactive — serialbattery drives Bulk/Absorption/Float transitions.
 
 ```
 Normal charge (3.55V/cell = 28.4V)
@@ -189,7 +191,7 @@ DCL:   0%       5%     100%
 | `/Info/MaxDischargeCurrent` | 150A | 150A |
 | `/Dc/0/Voltage` | live | live |
 | `/Dc/0/Current` | from SmartShunt LFP (277) | from SmartShunt LFP (277) |
-| `/Soc` | own coulomb counter | own coulomb counter |
+| `/Soc` | from serialbattery | from serialbattery |
 
 ### 5. FLA Equalisation Service
 
@@ -211,9 +213,9 @@ Persistent daemontools service that monitors conditions and orchestrates equalis
               v                                           |
   [2: Disconnecting LFP]                                  |
               |  open relay 2                             |
-              |  verify: LFP current < 5A                 |
+              |  verify: LFP current readable AND < 5A    |
               |  record LFP voltage at disconnect         |
-              |  raise CVL to 31.5V (EQ voltage)          |
+              |  raise CVL to 31.5V (temp-compensated)    |
               v                                           |
   [3: Equalising FLA]                                     |
               |  monitor SmartShunt Trojan current         |
@@ -225,10 +227,11 @@ Persistent daemontools service that monitors conditions and orchestrates equalis
               v                                           |
   [5: Voltage matching]                                   |
               |  reduce CVL to 27.0V (float)              |
-              |  wait for |V_trojan - V_lfp| < 1V         |
+              |  wait for |V_trojan - V_lfp| <= 1V        |
               |  check SmartShunt Trojan responsive        |
+              |  check SmartShunt LFP responsive (5 min)  |
               |                                           |
-              | (delta < 1V)                              |
+              | (delta <= 1V)                              |
               v                                           |
   [6: Reconnecting LFP]                                   |
               |  close relay 2                            |
@@ -243,15 +246,18 @@ Persistent daemontools service that monitors conditions and orchestrates equalis
               |                                           |
               +───────────────────────────────────────────+
 
-     Any state ──> [8: Error]
+     Any state ──> [8: Error] (durable — persists across timer ticks until next successful run)
                       |
                       v
                    finally block:
+                     - restore BatteryService + DVCC settings
                      - deregister temp service
                      - check relay state:
                          if open AND delta > 1V: alarm, do NOT close (manual)
-                         if open AND delta <= 1V: auto-close
+                         if open AND delta <= 1V: close + verify read-back (alarm if read-back fails)
+                         if open AND voltages unreadable: alarm, do NOT close (manual)
                      - restart aggregate driver if stopped
+                     - release operation lock
 ```
 
 **Startup safety check (CRIT-4):**
@@ -265,9 +271,9 @@ Read relay 2 state
     |
     +── open (0) ──> Read voltage delta
                        |
-                       +── delta < 1V ──> Auto-close relay, log recovery
+                       +── delta <= 1V ──> Close relay + verify read-back (alarm if fails)
                        |
-                       +── delta >= 1V ──> Raise alarm, stay open (manual intervention)
+                       +── delta > 1V ──> Raise alarm, stay open (manual intervention)
                        |
                        +── voltages unreadable ──> Raise alarm, stay open (manual intervention)
 ```
@@ -286,19 +292,22 @@ Read relay 2 state
 | Guard | Trigger | Action |
 |-------|---------|--------|
 | **Crash-safe CVL** | Service crash before relay opens | Temp service at 28.4V (safe for LFPs), not 31.5V. CCL = 60A |
-| **Delta-aware finally** | Any abort with relay open | Only closes if delta < 1V; otherwise alarm + manual (limits inrush) |
-| **Startup recovery** | Service start with open relay | Checks delta, auto-closes or alarms |
-| **Relay verification** | After relay open AND close | Reads back hardware state, aborts if mismatch |
-| **Orion failure** | LFP V drops > 0.5V during EQ | Abort + reconnect |
-| **SmartShunt Trojan** | V_trojan = None | Abort in both EQ and voltage matching |
+| **Delta-aware finally** | Any abort with relay open | Closes if delta <= 1V + read-back verified; alarm if delta > 1V, voltages unreadable, or read-back fails |
+| **Startup recovery** | Service start with open relay | Closes + read-back if delta <= 1V; alarm if > 1V, unreadable, or read-back fails |
+| **Relay verification** | After every relay open and close | Reads back hardware state, aborts if mismatch. None current after open also aborts |
+| **Orion failure** | LFP V drops > 0.5V during EQ/charge | Abort + reconnect |
+| **SmartShunt Trojan** | V_trojan = None | Abort in EQ, absorption, and voltage matching |
+| **SmartShunt LFP** | V_lfp = None for 5 min in voltage matching | Abort + alarm (prevents multi-hour blind wait) |
 | **Current loss** | i_trojan = None for 5 min | Proceed to voltage matching (not full timeout) |
-| **Relay re-verification** | Every 30s during high-voltage phases | If relay found closed while CVL > 28.4V: abort immediately |
+| **Relay re-verification** | Every 30s during high-voltage phases | Uses temp-compensated CVL (not base setting); aborts if relay found closed while CVL > 28.4V |
 | **High current** | Trojan I > 60A during EQ | Warning (dynamo/MPPT detected) |
 | **Voltage match timeout** | > 4 hours | Alarm, stay disconnected, manual intervention |
-| **SoC enforcement** | RunNow with SoC < 95% | Refused — SoC never bypassed |
+| **SoC enforcement** | RunNow with SoC < 95% | Refused — SoC never bypassed, RunNow not consumed |
+| **RunNow preservation** | Pre-conditions fail (no AC, low SoC) | RunNow flag preserved until all gates pass |
+| **Durable error state** | Failed run | STATE_ERROR persists across timer ticks until next successful run |
 | **Inrush monitoring** | After relay reconnect | Measures and logs current + delta for calibration |
-| **Bounds validation** | Web UI setting change | Checked against min/max before D-Bus write |
-| **Double trigger** | RunNow race condition | Flag cleared when equalisation starts |
+| **Bounds validation** | Web UI setting change | Checked against min/max; unknown keys rejected |
+| **Double trigger** | RunNow race condition | Flag cleared when run starts |
 
 ## Integrated State Transitions
 
@@ -343,7 +352,7 @@ T+244 | Charging @ 28.4V | CVL from agg/99       | Running    | Running    | Idl
 |---|---|---|---|
 | T+1 (temp registered, aggregate still running) | 28.4V from agg/99 | Safe — on bus at 28.4V | Temp dies, aggregate unaffected |
 | T+2-T+7 (aggregate stopping) | 28.4V from temp/100 | Safe — 28.4V / 8 = 3.55V/cell | Startup check: relay closed, idle |
-| T+7-T+17 (relay open, CVL still 28.4V) | 28.4V from temp/100 | Safe — on Orion | Startup check: relay open, delta < 1V → auto-close |
+| T+7-T+17 (relay open, CVL still 28.4V) | 28.4V from temp/100 | Safe — on Orion | Startup check: relay open, delta <= 1V → auto-close |
 | T+17-T+168 (equalising at 31.5V) | **Temp dies → no CVL** | **Safe — on Orion** | Quattro stops charging. Startup: relay open, check delta |
 | T+169-T+229 (voltage matching at 27.0V) | **Temp dies → no CVL** | Safe — on Orion | Startup: relay open, check delta |
 | T+230 (relay just closed) | 27.0V from temp/100 | Safe — on bus at 27.0V | Normal restart |
@@ -379,8 +388,8 @@ T+4   | —                            | No CVL      | Open  | Alarm: manual int
    b. If closed (1): normal — relay was restored by hardware default or closed before reboot
    c. If open (0): interrupted equalisation
       - Read V_trojan and V_lfp
-      - If delta < 1V: auto-close relay, log recovery, proceed to idle
-      - If delta >= 1V: ALARM — do not close, manual intervention
+      - If delta <= 1V: auto-close relay, log recovery, proceed to idle
+      - If delta > 1V: ALARM — do not close, manual intervention
       - If voltages unreadable: ALARM — do not close, manual intervention
 5. Aggregate driver also restarts via rc.local (independent)
 6. System returns to normal operation (or error state for manual check)
@@ -412,8 +421,9 @@ Persistent daemontools service that detects undercharged Trojan FLA batteries an
               |  switch BatteryService to temp/100        |
               v                                           |
   [3: Disconnecting LFP]                                  |
-              |  open relay 2, verify LFP current < 5A    |
-              |  raise CVL to 29.64V (Trojan absorption)  |
+              |  open relay 2, verify LFP current readable  |
+              |  AND < 5A                                 |
+              |  raise CVL to 29.64V (temp-compensated)   |
               |  CCL = 60A                                |
               v                                           |
   [4: Phase 2 — FLA bulk] → [5: Phase 3 — Absorption]    |
@@ -424,10 +434,12 @@ Persistent daemontools service that detects undercharged Trojan FLA batteries an
               v                                           |
   [7: Voltage matching]                                   |
               |  reduce CVL to 27.0V (float)              |
-              |  wait for |V_trojan - V_lfp| < 1V         |
+              |  wait for |V_trojan - V_lfp| <= 1V        |
+              |  check SmartShunt Trojan + LFP responsive  |
               v                                           |
   [8: Reconnecting LFP]                                   |
-              |  close relay 2, verify, measure inrush    |
+              |  close relay 2, verify read-back           |
+              |  measure inrush current                   |
               v                                           |
   [9: Restarting driver]                                  |
               |  deregister temp, restart aggregate       |
@@ -496,7 +508,7 @@ During FLA equalisation (31.5V base, temp-compensated, CCL 60A):
 3. Temp battery service CVL + CCL:
    - Phase 1 (relay closed): 28.4V / 60A — safe for LFPs
    - Phase 2 (relay open, verified): 31.5V / 60A — for Trojans only
-   - Phase 3 (matching): 27.0V / 60A — float, waiting for delta < 1V
+   - Phase 3 (matching): 27.0V / 60A — float, waiting for delta <= 1V
 4. DVCC reads from temp service
 5. Quattro + MPPT charge per DVCC command, capped at 60A total
 
@@ -505,7 +517,7 @@ During FLA charge (29.64V absorption, CCL 60A):
 3. Temp battery service CVL + CCL:
    - Phase 1 (shared): aggregate controls, both banks on bus
    - Phase 2 (relay open, verified): 29.64V / 60A — Trojan absorption
-   - Phase 3 (matching): 27.0V / 60A — float, waiting for delta < 1V
+   - Phase 3 (matching): 27.0V / 60A — float, waiting for delta <= 1V
 4-5. Same as above
 ```
 

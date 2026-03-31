@@ -36,7 +36,7 @@ The parallel setup works well for daily cycling, but FLA batteries periodically 
 
 ![Charge sequences](docs/charge-sequences.png)
 
-The solution is temporary physical isolation: a relay disconnects the LFPs from the DC bus during high-voltage FLA charging, while an Orion DC-DC charger independently maintains the LFPs at a safe voltage. After the FLA charge completes, the system waits for the voltages to converge (delta < 1V) before reconnecting. This repo automates the entire sequence — scheduling, relay control, voltage management, convergence monitoring, and reconnection — with layered safety guards to protect against every failure mode identified during development.
+The solution is temporary physical isolation: a relay disconnects the LFPs from the DC bus during high-voltage FLA charging, while an Orion DC-DC charger independently maintains the LFPs at a safe voltage. After the FLA charge completes, the system waits for the voltages to converge (delta <= 1V) before reconnecting. This repo automates the entire sequence — scheduling, relay control, voltage management, convergence monitoring, and reconnection — with layered safety guards to protect against every failure mode identified during development.
 
 ## System Overview
 
@@ -95,7 +95,7 @@ Automated Trojan L16H-AC equalisation. Runs as a persistent daemontools service 
 - Exit criteria: bus voltage >= 31.4V AND current < 10A
 - CCL = 60A to protect FLA bank
 - LFP isolation via relay 2, Orion DC-DC maintains LFP charge
-- Voltage matching (delta < 1V) before reconnecting to limit inrush current
+- Voltage matching (delta <= 1V) before reconnecting to limit inrush current
 
 ### 4. FLA Charge Service (`fla-charge/`)
 
@@ -114,7 +114,7 @@ Common code shared between both services:
 | Module | Purpose |
 |--------|---------|
 | `relay_control.py` | Relay open/close with verification, delta-aware cleanup, startup recovery |
-| `voltage_matching.py` | Convergence loop — waits for delta < 1V before reconnect |
+| `voltage_matching.py` | Convergence loop — waits for delta <= 1V before reconnect |
 | `temp_battery.py` | Subprocess manager for temporary D-Bus battery service |
 | `temp_battery_process.py` | Standalone D-Bus battery service (runs as subprocess) |
 | `temp_compensation.py` | Trojan L16H-AC temperature compensation (±0.005V/cell/°C) |
@@ -246,31 +246,33 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 | Guard | Trigger | Action |
 |-------|---------|--------|
 | **Crash-safe CVL** | Service crash before relay opens | Temp service at 28.4V (safe for LFPs), not 31.5V. CCL = 60A |
-| **Relay re-verification** | Every 30s during high-voltage phases | If relay found closed while CVL > 28.4V: abort immediately |
-| **Delta-aware relay** | `finally` block on any abort | Only closes relay if delta < 1V; otherwise alarm, leaves LFPs on Orion |
-| **Startup recovery** | Service restart with relay open | Checks delta: auto-closes if < 1V, alarms if >= 1V |
-| **Relay verification** | After every relay command | Reads back relay state; aborts if mismatch |
+| **Relay re-verification** | Every 30s during high-voltage phases | Uses temp-compensated CVL; aborts if relay found closed while CVL > 28.4V |
+| **Delta-aware relay** | `finally` block on any abort | Closes if delta <= 1V + read-back verified; alarm if > 1V, unreadable, or read-back fails |
+| **Startup recovery** | Service restart with relay open | Closes + read-back if delta <= 1V; alarm if > 1V or unreadable |
+| **Relay verification** | After every relay command | Reads back state; aborts if mismatch. Unreadable LFP current after open also aborts |
 | **Orion failure detection** | LFP voltage drops > 0.5V during EQ/charge | Aborts and reconnects |
 | **Temperature compensation** | Every charge cycle | Adjusts voltages per Trojan datasheet (±0.06V/°C from 25°C) |
 | **Inrush monitoring** | After relay reconnect | Logs inrush current and delta for calibration |
-| **SoC enforcement** | RunNow on EQ service | LFP SoC >= 95% always required (never bypassed) |
-| **SmartShunt watchdog** | SmartShunt Trojan goes offline | Immediate abort |
+| **SoC enforcement** | RunNow on EQ service | LFP SoC >= 95% always required; RunNow not consumed until gates pass |
+| **RunNow preservation** | Pre-conditions fail | RunNow flag kept until all gates pass (not wasted on transient failures) |
+| **Durable error state** | Failed run | STATE_ERROR persists in dashboard until next successful run |
+| **SmartShunt watchdog** | SmartShunt Trojan or LFP offline | Immediate abort (Trojan) or alarm after 5 min (LFP in voltage matching) |
 | **Current limiting** | CCL = 60A via temp battery service | DVCC enforces across Quattro + MPPT |
 | **Atomic locking** | Both services share operation lock | Prevents concurrent charge + EQ (O_EXCL) |
 
 ## Testing
 
 ```bash
-# Run all tests (138 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 83 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 33 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 22 tests — charge service
+# Run all tests (148 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 90 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 34 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 24 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-138 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver), EQ scheduling/safety/happy path/Orion failure detection, and charge scheduling/phase transitions/safety guards.
+148 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver), EQ scheduling/safety/happy path/Orion failure/RunNow preservation, and charge scheduling/phase transitions/safety guards/taper detection.
 
 ## Files
 
@@ -294,7 +296,7 @@ zwartewater-victron/
 |   +-- alerting.py                 # Buzzer + alarm
 |   +-- lock.py                     # Atomic file-based operation lock
 |   +-- aggregate_driver.py         # Start/stop aggregate batteries
-|   +-- tests/                      # 83 unit tests for shared modules
+|   +-- tests/                      # 90 unit tests for shared modules
 +-- fla-equalisation/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
@@ -303,7 +305,7 @@ zwartewater-victron/
 |   +-- settings.py                 # Venus OS settings integration
 |   +-- web_server.py               # Web dashboard (port 8088)
 |   +-- service/run                 # Daemontools service runner
-|   +-- tests/                      # 33 unit tests
+|   +-- tests/                      # 34 unit tests
 +-- fla-charge/
     +-- install.sh                  # Venus OS installer
     +-- fla_charge.py               # Main charge service
@@ -311,7 +313,7 @@ zwartewater-victron/
     +-- settings.py                 # Venus OS settings integration
     +-- web_server.py               # Web dashboard (port 8089)
     +-- service/run                 # Daemontools service runner
-    +-- tests/                      # 22 unit tests
+    +-- tests/                      # 24 unit tests
 ```
 
 ## References
