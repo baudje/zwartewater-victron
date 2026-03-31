@@ -77,16 +77,15 @@ def days_until_next(settings):
 
 
 def should_run(settings, monitor):
-    """Check if all scheduling conditions are met."""
+    """Check if all scheduling conditions are met.
+
+    RunNow bypasses interval and time window, NOT SoC.
+    RunNow is only consumed once all hard safety gates pass.
+    """
     if not settings.enabled:
         return False
 
-    # Check RunNow override (bypasses interval and time window, NOT SoC)
     run_now_flag = settings.run_now
-    if run_now_flag:
-        log.info("RunNow flag set — bypassing interval and time window checks")
-        settings.clear_run_now()
-
     if not run_now_flag:
         # Check interval
         if days_until_next(settings) > 0:
@@ -104,6 +103,11 @@ def should_run(settings, monitor):
         return False
     if soc < settings.lfp_soc_min:
         return False
+
+    # All gates passed — now consume RunNow
+    if run_now_flag:
+        log.info("RunNow flag set — bypassing interval and time window checks")
+        settings.clear_run_now()
 
     log.info("All conditions met: SoC=%.1f%%, time=%s", soc, datetime.now().strftime("%H:%M"))
     return True
