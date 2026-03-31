@@ -26,7 +26,10 @@ def verify_relay_open(monitor, wait_seconds=10):
     """Verify LFP is disconnected after relay open. Returns True if verified."""
     time.sleep(wait_seconds)
     lfp_current = monitor.get_lfp_current()
-    if lfp_current is not None and abs(lfp_current) > 5.0:
+    if lfp_current is None:
+        log.error("Cannot read LFP current — cannot verify relay disconnection")
+        return False
+    if abs(lfp_current) > 5.0:
         log.error("LFP current still %.1fA after relay open — relay may not have opened", abs(lfp_current))
         return False
     return True
@@ -137,7 +140,7 @@ def startup_safety_check(monitor, status=None, alerting_mod=None):
 
     if v_t is not None and v_l is not None:
         delta = abs(v_t - v_l)
-        if delta < RELAY_CLOSE_DELTA_MAX:
+        if delta <= RELAY_CLOSE_DELTA_MAX:
             log.info("STARTUP: Delta=%.1fV safe — closing relay", delta)
             if not monitor.set_relay(1):
                 log.error("STARTUP: Failed to send relay close command")

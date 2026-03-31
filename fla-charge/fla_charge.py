@@ -295,8 +295,8 @@ def run_charge(settings, monitor, status):
                 alerting.raise_alarm("SmartShunt Trojan unresponsive during absorption", status_service=status)
                 return False
 
-            # Verify relay still open — external close at 29.64V would damage LFPs
-            if not verify_relay_still_open(monitor, settings.fla_bulk_voltage):
+            # Verify relay still open — external close at compensated CVL would damage LFPs
+            if not verify_relay_still_open(monitor, abs_voltage):
                 status.update(state=STATE_ERROR)
                 alerting.raise_alarm("Relay closed externally during absorption — aborting", status_service=status)
                 return False
