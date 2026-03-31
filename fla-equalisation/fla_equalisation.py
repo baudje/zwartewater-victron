@@ -215,6 +215,7 @@ def run_equalisation(settings, monitor, status):
                     and v_lfp < lfp_voltage_at_disconnect - 0.5):
                 log.warning("LFP voltage dropping (%.2fV -> %.2fV) — possible Orion failure",
                             lfp_voltage_at_disconnect, v_lfp)
+                status.update(state=STATE_ERROR)
                 raise_alarm("LFP voltage dropping — Orion may have failed", status_service=status)
                 return False
 
@@ -266,11 +267,13 @@ def run_equalisation(settings, monitor, status):
             cache_callback=_vm_cache_cb,
         )
         if not matched:
+            status.update(state=STATE_ERROR)
             return False
 
         # Step 8: Close relay 2
         status.update(state=STATE_RECONNECTING)
         if not close_relay_verified(monitor):
+            status.update(state=STATE_ERROR)
             raise_alarm("Failed to close relay 2", status_service=status)
             return False
 
@@ -295,6 +298,7 @@ def run_equalisation(settings, monitor, status):
         # Step 10: Restart aggregate driver
         status.update(state=STATE_RESTARTING_DRIVER)
         if not start_aggregate_driver():
+            status.update(state=STATE_ERROR)
             raise_alarm("Failed to restart aggregate driver", status_service=status)
             return False
         monitor.invalidate_services()
@@ -308,6 +312,7 @@ def run_equalisation(settings, monitor, status):
 
     except Exception as e:
         log.exception("Unexpected error during equalisation: %s", e)
+        status.update(state=STATE_ERROR)
         raise_alarm("Equalisation script error: %s" % e, status_service=status)
         return False
 
