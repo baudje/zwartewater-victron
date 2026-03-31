@@ -73,7 +73,16 @@ def close_relay_delta_aware(monitor, alerting_mod=None, status=None):
             return  # Do NOT close
         log.warning("Safety: closing relay (delta=%.1fV)", delta)
     else:
-        log.warning("Safety: closing relay (voltages unreadable — assuming safe)")
+        log.error(
+            "SAFETY: Cannot read voltages — leaving relay open for safety. "
+            "Manual intervention required."
+        )
+        if alerting_mod and status:
+            alerting_mod.raise_alarm(
+                "Relay open, voltages unreadable — manual close required",
+                status_service=status,
+            )
+        return  # Do NOT close
 
     monitor.set_relay(1)
     time.sleep(2)

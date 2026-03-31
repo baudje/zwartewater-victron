@@ -25,6 +25,7 @@ def wait_for_match(monitor, temp_service, status, alerting_mod,
     match_start = time.time()
     match_timeout = timeout_hours * 3600
     delta = None
+    lfp_none_count = 0
 
     while True:
         elapsed = time.time() - match_start
@@ -40,6 +41,20 @@ def wait_for_match(monitor, temp_service, status, alerting_mod,
                     status_service=status,
                 )
             return False, delta
+
+        # SmartShunt LFP responsive check
+        if v_trojan is not None and v_lfp is None:
+            lfp_none_count += 1
+            if lfp_none_count >= 10:  # 10 × 30s = 5 minutes
+                log.error("SmartShunt LFP unresponsive for 5 minutes during voltage matching")
+                if alerting_mod and status:
+                    alerting_mod.raise_alarm(
+                        "SmartShunt LFP unresponsive during voltage matching",
+                        status_service=status,
+                    )
+                return False, delta
+        else:
+            lfp_none_count = 0
 
         if v_trojan is not None and v_lfp is not None:
             delta = abs(v_trojan - v_lfp)

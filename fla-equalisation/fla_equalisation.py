@@ -398,12 +398,14 @@ class FlaEqualisationService:
         if not pending:
             return
         for key, value in pending.items():
-            if key in SETTINGS_DEFS:
-                _, _, minimum, maximum = SETTINGS_DEFS[key]
-                if value < minimum or value > maximum:
-                    log.warning("Setting %s value %s out of bounds [%s, %s] — rejected",
-                                key, value, minimum, maximum)
-                    continue
+            if key not in SETTINGS_DEFS:
+                log.warning("Unknown setting key '%s' — skipped", key)
+                continue
+            _, _, minimum, maximum = SETTINGS_DEFS[key]
+            if value < minimum or value > maximum:
+                log.warning("Setting %s value %s out of bounds [%s, %s] — rejected",
+                            key, value, minimum, maximum)
+                continue
             self.settings._write(key, value)
             log.info("Setting %s updated to %s via web UI", key, value)
 
@@ -426,6 +428,7 @@ class FlaEqualisationService:
             if should_run(self.settings, self.monitor):
                 self._running = True
                 _cache["run_now_requested"] = False  # CRIT-5: Clear flag after eq starts
+                success = False
                 try:
                     success = run_equalisation(self.settings, self.monitor, self.status)
                     if success:
@@ -434,7 +437,14 @@ class FlaEqualisationService:
                         log.error("Equalisation run failed — check alarms")
                 finally:
                     self._running = False
-                    self._update_idle_status()
+                    if success:
+                        self._update_idle_status()
+                    else:
+                        # Preserve error state — only update live voltages
+                        update_cache(
+                            trojan_v=self.monitor.get_trojan_voltage(),
+                            lfp_v=self.monitor.get_lfp_voltage(),
+                        )
 
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
