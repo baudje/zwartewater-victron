@@ -113,16 +113,14 @@ def should_run(settings, monitor):
 
     RunNow bypasses the SoC trigger (intentional — allows manual charge at any SoC).
     AC input is always enforced, even on RunNow.
+    RunNow is only consumed once all pre-conditions pass.
     """
     if not settings.enabled:
         return False
 
     trojan_soc = monitor.get_trojan_soc()
     run_now_flag = settings.run_now
-    if run_now_flag:
-        log.info("RunNow flag set — bypassing SoC trigger (AC still enforced)")
-        settings.clear_run_now()
-    else:
+    if not run_now_flag:
         if trojan_soc is None:
             log.warning("Cannot read Trojan SoC")
             return False
@@ -132,6 +130,11 @@ def should_run(settings, monitor):
     if not is_ac_available(monitor):
         log.debug("No AC input available")
         return False
+
+    # All pre-conditions passed — now consume RunNow
+    if run_now_flag:
+        log.info("RunNow flag set — bypassing SoC trigger")
+        settings.clear_run_now()
 
     log.info("FLA charge conditions met: Trojan SoC=%.1f%%, AC available", trojan_soc or 0)
     return True
@@ -187,7 +190,7 @@ def run_charge(settings, monitor, status):
             transition_reason = None
             if lfp_soc is not None and lfp_soc >= settings.lfp_soc_transition:
                 transition_reason = "LFP SoC %.1f%% >= %d%%" % (lfp_soc, settings.lfp_soc_transition)
-            elif charge_current is not None and abs(charge_current) < settings.current_taper_threshold:
+            elif charge_current is not None and charge_current > 0 and charge_current < settings.current_taper_threshold:
                 transition_reason = "Charge current %.1fA < %.1fA" % (abs(charge_current), settings.current_taper_threshold)
             elif max_cell_v is not None and max_cell_v >= settings.lfp_cell_voltage_disconnect:
                 transition_reason = "LFP cell voltage %.3fV >= %.3fV" % (max_cell_v, settings.lfp_cell_voltage_disconnect)
@@ -469,11 +472,13 @@ class FlaChargeService:
         pending = _cache.pop("pending_settings", None)
         if not pending: return
         for key, value in pending.items():
-            if key in SETTINGS_DEFS:
-                _, _, minimum, maximum = SETTINGS_DEFS[key]
-                if value < minimum or value > maximum:
-                    log.warning("Setting %s value %s out of bounds — rejected", key, value)
-                    continue
+            if key not in SETTINGS_DEFS:
+                log.warning("Unknown setting key '%s' — skipped", key)
+                continue
+            _, _, minimum, maximum = SETTINGS_DEFS[key]
+            if value < minimum or value > maximum:
+                log.warning("Setting %s value %s out of bounds — rejected", key, value)
+                continue
             self.settings._write(key, value)
             log.info("Setting %s updated to %s via web UI", key, value)
 
@@ -487,6 +492,7 @@ class FlaChargeService:
             if should_run(self.settings, self.monitor):
                 self._running = True
                 _cache["run_now_requested"] = False
+                success = False
                 try:
                     success = run_charge(self.settings, self.monitor, self.status)
                     if success:
@@ -495,7 +501,14 @@ class FlaChargeService:
                         log.error("FLA charge failed — check alarms")
                 finally:
                     self._running = False
-                    self._update_idle_status()
+                    if success:
+                        self._update_idle_status()
+                    else:
+                        # Preserve error state — only update live voltages
+                        update_cache(
+                            trojan_v=self.monitor.get_trojan_voltage(),
+                            lfp_v=self.monitor.get_lfp_voltage(),
+                        )
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
         return True

@@ -167,5 +167,47 @@ class TestWaitForMatch(unittest.TestCase):
         self.alerting_mod.raise_alarm.assert_called_once()
 
 
+    # 11. Persistent LFP None raises alarm after 10 iterations
+    @patch('voltage_matching.time')
+    def test_lfp_none_persistent_raises_alarm(self, mock_time):
+        """Persistent LFP voltage=None should alarm after 10 reads, not wait full timeout."""
+        # 12 time.time() calls: 1 for match_start + 11 for iterations (triggers at count=10)
+        mock_time.time.side_effect = [0] + [i * 35 for i in range(1, 13)]
+        mock_time.sleep = MagicMock()
+        monitor = MockMonitor(trojan_voltage=27.0, lfp_voltage=None)
+
+        matched, delta = wait_for_match(
+            monitor, self.temp_service, self.status, self.alerting_mod,
+            voltage_delta_max=1.0, timeout_hours=4.0,
+        )
+        self.assertFalse(matched)
+        self.alerting_mod.raise_alarm.assert_called_once()
+
+    # 12. Transient LFP None resets counter
+    @patch('voltage_matching.time')
+    def test_lfp_none_transient_resets_counter(self, mock_time):
+        """LFP returning after a few None reads should reset the counter and converge."""
+        # Need enough time values: 1 for match_start + 2 per iteration (elapsed check + sleep)
+        # 3 None iterations + 1 convergence = 4 iterations, ~8 time.time() calls
+        mock_time.time.side_effect = [0] + [i * 35 for i in range(1, 10)]
+        mock_time.sleep = MagicMock()
+        monitor = MockMonitor(trojan_voltage=27.0)
+        # 3 None reads then a valid read that converges
+        lfp_values = [None, None, None, 27.0]
+        call_count = [0]
+        def lfp_side_effect():
+            idx = min(call_count[0], len(lfp_values) - 1)
+            call_count[0] += 1
+            return lfp_values[idx]
+        monitor.get_lfp_voltage = lfp_side_effect
+
+        matched, delta = wait_for_match(
+            monitor, self.temp_service, self.status, self.alerting_mod,
+            voltage_delta_max=1.0, timeout_hours=4.0,
+        )
+        self.assertTrue(matched)
+        self.alerting_mod.raise_alarm.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

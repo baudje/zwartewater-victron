@@ -104,6 +104,15 @@ class TestShouldRun(unittest.TestCase):
         with patch('fla_charge.is_ac_available', return_value=False):
             self.assertFalse(should_run(self.settings, self.monitor))
 
+    def test_run_now_not_consumed_when_no_ac(self):
+        """RunNow should NOT be cleared if AC is unavailable."""
+        self.settings.run_now = True
+        self.monitor._trojan_soc = 90.0
+        with patch('fla_charge.is_ac_available', return_value=False):
+            result = should_run(self.settings, self.monitor)
+        self.assertFalse(result)
+        self.assertFalse(self.settings._cleared_run_now)
+
     def test_run_now_clears_flag(self):
         self.settings.run_now = True
         self.monitor._trojan_soc = 90.0
@@ -401,6 +410,28 @@ class TestPhase1Transitions(unittest.TestCase):
         with patch('fla_charge.update_cache'):
             result = run_charge(settings, monitor, status)
         self.assertFalse(result)
+
+
+    @patch('fla_charge.release_lock')
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.time')
+    def test_phase1_discharge_current_does_not_trigger_taper(self, mock_time, mock_cell_v,
+                                                              mock_ac, mock_lock, mock_unlock):
+        """Small discharge current should NOT trigger Phase 1 → 2 taper transition."""
+        mock_time.time.side_effect = [0, 30000]  # will hit timeout
+        mock_time.sleep = MagicMock()
+        settings = MockChargeSettings()
+        # lfp_current=-5.0 (discharge), lfp_soc=50 (below transition), cell=3.40 (below disconnect)
+        # abs(-5)=5 < 20 threshold — old code would wrongly trigger taper
+        monitor = MockMonitor(lfp_soc=50.0, trojan_soc=70.0, lfp_current=-5.0)
+        status = MockStatus()
+        with patch('fla_charge.update_cache'):
+            result = run_charge(settings, monitor, status)
+        self.assertFalse(result)  # Timeout, not Phase 2 transition
+        self.assertIn(STATE_PHASE1_SHARED, status.states)
+        self.assertNotIn(STATE_STOPPING_DRIVER, status.states)
 
 
 if __name__ == '__main__':

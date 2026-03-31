@@ -115,10 +115,23 @@ class TestCloseRelayDeltaAware(unittest.TestCase):
         relay_control.close_relay_delta_aware(monitor)
         self.assertIn(1, monitor._relay_set_calls)
 
-    def test_unreadable_voltages_closes(self, mock_time):
+    def test_unreadable_voltages_raises_alarm_and_does_not_close(self, mock_time):
+        """Unreadable voltages: do NOT close relay, raise alarm."""
         monitor = MockMonitor(relay_state=0, trojan_voltage=None, lfp_voltage=27.0)
-        relay_control.close_relay_delta_aware(monitor)
-        self.assertIn(1, monitor._relay_set_calls)
+        alerting_mod = MagicMock()
+        status = MockStatus()
+        relay_control.close_relay_delta_aware(monitor, alerting_mod=alerting_mod, status=status)
+        self.assertEqual(monitor._relay_set_calls, [])
+        alerting_mod.raise_alarm.assert_called_once()
+
+    def test_one_voltage_none_raises_alarm_and_does_not_close(self, mock_time):
+        """One voltage unreadable: do NOT close relay, raise alarm."""
+        monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=None)
+        alerting_mod = MagicMock()
+        status = MockStatus()
+        relay_control.close_relay_delta_aware(monitor, alerting_mod=alerting_mod, status=status)
+        self.assertEqual(monitor._relay_set_calls, [])
+        alerting_mod.raise_alarm.assert_called_once()
 
     def test_no_alerting_mod_no_crash(self, mock_time):
         monitor = MockMonitor(relay_state=0, trojan_voltage=28.5, lfp_voltage=27.0)
