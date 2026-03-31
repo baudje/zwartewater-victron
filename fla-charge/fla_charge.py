@@ -430,6 +430,7 @@ class FlaChargeService:
         self.status = StatusService()
         self.status.register()
         self._running = False
+        self._failed = False
         startup_safety_check(self.monitor, self.status, alerting)
         self._update_idle_status()
         log.info("FLA charge service started — checking every %ds", CHECK_INTERVAL_SEC)
@@ -488,9 +489,12 @@ class FlaChargeService:
             self._apply_pending_settings()
             if check_run_now():
                 self.settings._write("run_now", 1)
-            self._update_idle_status()
+            # Don't overwrite error state on subsequent ticks
+            if not self._failed:
+                self._update_idle_status()
             if should_run(self.settings, self.monitor):
                 self._running = True
+                self._failed = False
                 _cache["run_now_requested"] = False
                 success = False
                 try:
@@ -499,16 +503,12 @@ class FlaChargeService:
                         log.info("FLA charge completed successfully")
                     else:
                         log.error("FLA charge failed — check alarms")
+                        self._failed = True
                 finally:
                     self._running = False
                     if success:
+                        self._failed = False
                         self._update_idle_status()
-                    else:
-                        # Preserve error state — only update live voltages
-                        update_cache(
-                            trojan_v=self.monitor.get_trojan_voltage(),
-                            lfp_v=self.monitor.get_lfp_voltage(),
-                        )
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
         return True

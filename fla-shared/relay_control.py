@@ -84,8 +84,22 @@ def close_relay_delta_aware(monitor, alerting_mod=None, status=None):
             )
         return  # Do NOT close
 
-    monitor.set_relay(1)
+    if not monitor.set_relay(1):
+        log.error("SAFETY: Failed to send relay close command during cleanup")
+        if alerting_mod and status:
+            alerting_mod.raise_alarm(
+                "Relay close command failed — manual close required",
+                status_service=status,
+            )
+        return
     time.sleep(2)
+    if monitor.get_relay_state() != 1:
+        log.error("SAFETY: Relay read-back still open after close command")
+        if alerting_mod and status:
+            alerting_mod.raise_alarm(
+                "Relay close failed (read-back) — manual close required",
+                status_service=status,
+            )
 
 
 def verify_relay_still_open(monitor, current_cvl):
@@ -125,8 +139,22 @@ def startup_safety_check(monitor, status=None, alerting_mod=None):
         delta = abs(v_t - v_l)
         if delta < RELAY_CLOSE_DELTA_MAX:
             log.info("STARTUP: Delta=%.1fV safe — closing relay", delta)
-            monitor.set_relay(1)
+            if not monitor.set_relay(1):
+                log.error("STARTUP: Failed to send relay close command")
+                if alerting_mod and status:
+                    alerting_mod.raise_alarm(
+                        "Startup: relay close command failed — manual close required",
+                        status_service=status,
+                    )
+                return
             time.sleep(3)
+            if monitor.get_relay_state() != 1:
+                log.error("STARTUP: Relay read-back still open after close command")
+                if alerting_mod and status:
+                    alerting_mod.raise_alarm(
+                        "Startup: relay close failed (read-back) — manual close required",
+                        status_service=status,
+                    )
         else:
             log.error("STARTUP: Delta=%.1fV too high — leaving relay open, alarm raised", delta)
             if alerting_mod and status:

@@ -138,7 +138,7 @@ def main():
                 iface = dbus.Interface(obj, "com.victronenergy.BusItem")
                 i = float(iface.GetValue())
                 svc["/Dc/0/Current"] = i
-                if v and i:
+                if v is not None and i is not None:
                     svc["/Dc/0/Power"] = round(v * i, 0)
             except Exception:
                 pass
