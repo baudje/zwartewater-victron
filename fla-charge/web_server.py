@@ -10,11 +10,20 @@ avoiding cross-thread D-Bus calls.
 import json
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
+from threading import Lock, Thread
 
 log = logging.getLogger(__name__)
 
 PORT = 8089
+
+_pending_settings_lock = Lock()
+
+
+def drain_pending_settings():
+    """Atomically take pending web UI setting updates for the GLib thread."""
+    with _pending_settings_lock:
+        return _cache.pop("pending_settings", None) or []
+
 
 # Shared cache — written by GLib thread, read by HTTP thread
 _cache = {
@@ -290,10 +299,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body)
-                # Store in cache — the GLib thread will pick it up and write to D-Bus
                 key = data["key"]
                 value = data["value"]
-                _cache.setdefault("pending_settings", {})[key] = value
+                
+                from settings import SETTINGS_DEFS
+                if key not in SETTINGS_DEFS:
+                    raise ValueError("Unknown setting key: " + str(key))
+
+                # Store in cache — the GLib thread will pick it up and write to D-Bus
+                with _pending_settings_lock:
+                    _cache.setdefault("pending_settings", []).append((key, value))
                 # Also update cache immediately so UI sees the change
                 if "settings" in _cache and isinstance(_cache["settings"], dict):
                     _cache["settings"][key] = value
