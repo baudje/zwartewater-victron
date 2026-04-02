@@ -183,7 +183,7 @@ class DbusMonitor:
         return _get_dbus_value(self.bus, SYSTEM_SERVICE, RELAY_STATE_PATH)
 
     def get_battery_service_setting(self):
-        """Read the Venus OS BatteryService setting (which battery DVCC uses)."""
+        """Read the Venus OS BatteryService setting (which battery the system uses for display/ESS)."""
         return _get_dbus_value(
             self.bus, "com.victronenergy.settings",
             "/Settings/SystemSetup/BatteryService",
@@ -202,6 +202,45 @@ class DbusMonitor:
             return True
         except dbus.exceptions.DBusException as e:
             log.error("Failed to set BatteryService: %s", e)
+            return False
+
+    def get_bms_instance(self):
+        """Read the BmsInstance setting (which BMS DVCC reads CVL/CCL/DCL from).
+        -1 = auto-select, -255 = no BMS, other = explicit device instance."""
+        return _get_dbus_value(
+            self.bus, "com.victronenergy.settings",
+            "/Settings/SystemSetup/BmsInstance",
+        )
+
+    def set_bms_instance(self, instance):
+        """Set the BmsInstance setting. Returns True on success."""
+        try:
+            obj = self.bus.get_object(
+                "com.victronenergy.settings",
+                "/Settings/SystemSetup/BmsInstance",
+            )
+            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+            iface.SetValue(dbus.Int32(instance))
+            log.info("BmsInstance set to %d", instance)
+            return True
+        except dbus.exceptions.DBusException as e:
+            log.error("Failed to set BmsInstance: %s", e)
+            return False
+
+    def restart_systemcalc(self):
+        """Restart dbus-systemcalc-py so it discovers newly registered battery services.
+        systemcalc doesn't detect services registered after boot — restart forces rescan."""
+        import subprocess
+        try:
+            subprocess.run(["svc", "-d", "/service/dbus-systemcalc-py"], capture_output=True)
+            import time as _time
+            _time.sleep(2)
+            subprocess.run(["svc", "-u", "/service/dbus-systemcalc-py"], capture_output=True)
+            _time.sleep(5)
+            log.info("systemcalc restarted for service discovery")
+            return True
+        except Exception as e:
+            log.error("Failed to restart systemcalc: %s", e)
             return False
 
     def get_dvcc_max_charge_voltage(self):
