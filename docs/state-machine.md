@@ -69,8 +69,9 @@ Normal:       ActiveBattery = aggregate/99, Relay2 = closed, CVL = 28.4V
     v (FLA equaliser registers temp service at 28.4V — coexists with aggregate)
 Preparing:    ActiveBattery = aggregate/99 (still wins, lower instance), Relay2 = closed
     |
-    v (FLA equaliser stops aggregate driver)
-Transitioning: ActiveBattery = temp/100 at 28.4V (safe), Relay2 = closed
+    v (FLA equaliser stops aggregate driver, restarts systemcalc for discovery)
+    v (FLA equaliser switches BatteryService + BmsInstance to temp/100)
+Transitioning: ActiveBms = temp/100 at 28.4V (safe), Relay2 = closed
     |          *** If crash here: 28.4V is safe for both banks ***
     v (FLA equaliser opens relay 2, verifies open)
 Disconnected: ActiveBattery = temp/100 at 28.4V, Relay2 = open, Orion active
@@ -222,6 +223,7 @@ Persistent daemontools service that monitors conditions and orchestrates equalis
               |  detect Orion failure (LFP V drop > 0.5V) |
               |  warn if Trojan I > 60A (dynamo/MPPT)     |
               |  handle i_trojan=None (5 min timeout)     |
+              |  check abort flag from web UI              |
               |                                           |
               | (V >= 31.4V AND I < 10A, OR timeout/lost) |
               v                                           |
@@ -250,7 +252,7 @@ Persistent daemontools service that monitors conditions and orchestrates equalis
                       |
                       v
                    finally block:
-                     - restore BatteryService + DVCC settings
+                     - restore BmsInstance, BatteryService, DVCC settings
                      - deregister temp service
                      - check relay state:
                          if open AND delta > 1V: alarm, do NOT close (manual)
@@ -413,12 +415,12 @@ Persistent daemontools service that detects undercharged Trojan FLA batteries an
   [1: Phase 1 — Shared charging]                          |
               |  both banks on bus, serialbattery controls |
               |  wait for LFP SoC >= 95% OR taper OR cell |
-              |  voltage >= 3.50V                         |
+              |  voltage >= 3.50V. Check abort flag.      |
               v                                           |
   [2: Stopping driver]                                    |
               |  register temp svc at current bus V (safe) |
               |  stop aggregate driver                    |
-              |  switch BatteryService to temp/100        |
+              |  restart systemcalc + switch BmsInstance   |
               v                                           |
   [3: Disconnecting LFP]                                  |
               |  open relay 2, verify LFP current readable  |
@@ -429,6 +431,7 @@ Persistent daemontools service that detects undercharged Trojan FLA batteries an
   [4: Phase 2 — FLA bulk] → [5: Phase 3 — Absorption]    |
               |  monitor SmartShunt Trojan voltage/current |
               |  detect Orion failure, AC loss, high I     |
+              |  check abort flag from web UI              |
               |                                           |
               | (V >= 29.64V AND I < 10A, OR timeout)     |
               v                                           |
