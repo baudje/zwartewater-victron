@@ -25,6 +25,7 @@ from fla_charge import (
     should_run, read_last_charge, write_last_charge,
     run_charge, LAST_CHARGE_FILE,
 )
+from settings import SETTINGS_DEFS as CHARGE_SETTINGS_DEFS
 from dbus_status_service import (
     STATE_IDLE, STATE_PHASE1_SHARED, STATE_STOPPING_DRIVER,
     STATE_DISCONNECTING, STATE_PHASE2_BULK, STATE_PHASE3_ABSORPTION,
@@ -292,6 +293,83 @@ class TestRunChargeSafety(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
+    @patch('fla_charge.release_lock')
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.stop_aggregate', return_value=False)
+    @patch('fla_charge.start_aggregate', return_value=True)
+    @patch('fla_charge.time')
+    def test_temp_service_register_failure_aborts_before_stopping_driver(
+        self, mock_time, mock_start, mock_stop, mock_cell_v, mock_ac, mock_lock, mock_unlock
+    ):
+        mock_time.time.side_effect = [0, 5]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(lfp_soc=96.0)
+        with patch('fla_charge.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            mock_tbs.register.return_value = False
+            MockTBS.return_value = mock_tbs
+            with patch('fla_charge.update_cache'):
+                result = run_charge(settings, monitor, status)
+        self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
+        mock_stop.assert_not_called()
+
+    @patch('fla_charge.release_lock')
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.stop_aggregate', return_value=True)
+    @patch('fla_charge.start_aggregate', return_value=True)
+    @patch('fla_charge.open_relay', return_value=False)
+    @patch('fla_charge.time')
+    def test_systemcalc_restart_failure_aborts_before_relay_open(
+        self, mock_time, mock_open, mock_start, mock_stop, mock_cell_v, mock_ac, mock_lock, mock_unlock
+    ):
+        mock_time.time.side_effect = [0, 5]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(lfp_soc=96.0)
+        monitor.restart_systemcalc = MagicMock(return_value=False)
+        with patch('fla_charge.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            mock_tbs.register.return_value = True
+            MockTBS.return_value = mock_tbs
+            with patch('fla_charge.update_cache'):
+                result = run_charge(settings, monitor, status)
+        self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
+        mock_open.assert_not_called()
+
+    @patch('fla_charge.release_lock')
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.stop_aggregate', return_value=True)
+    @patch('fla_charge.start_aggregate', return_value=True)
+    @patch('fla_charge.open_relay', return_value=False)
+    @patch('fla_charge.time')
+    def test_bms_switch_confirmation_failure_aborts_before_relay_open(
+        self, mock_time, mock_open, mock_start, mock_stop, mock_cell_v, mock_ac, mock_lock, mock_unlock
+    ):
+        mock_time.time.side_effect = [0, 5]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(lfp_soc=96.0)
+        monitor.restart_systemcalc = MagicMock(return_value=True)
+        monitor.wait_for_bms_selection = MagicMock(return_value=False)
+        with patch('fla_charge.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            mock_tbs.register.return_value = True
+            MockTBS.return_value = mock_tbs
+            with patch('fla_charge.update_cache'):
+                result = run_charge(settings, monitor, status)
+        self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
+        monitor.wait_for_bms_selection.assert_called_once_with(
+            "com.victronenergy.battery/100", 100
+        )
+        mock_open.assert_not_called()
+
 
 class TestRunChargeFinally(unittest.TestCase):
     """Test the finally block restores state on failure."""
@@ -435,6 +513,16 @@ class TestPhase1Transitions(unittest.TestCase):
         self.assertFalse(result)  # Timeout, not Phase 2 transition
         self.assertIn(STATE_PHASE1_SHARED, status.states)
         self.assertNotIn(STATE_STOPPING_DRIVER, status.states)
+
+
+class TestSettingsBounds(unittest.TestCase):
+    """Test hard safety bounds match the documented operating envelope."""
+
+    def test_bulk_voltage_max_matches_documented_target(self):
+        self.assertEqual(CHARGE_SETTINGS_DEFS["fla_bulk_voltage"][3], 29.64)
+
+    def test_reconnect_delta_max_cannot_exceed_safe_limit(self):
+        self.assertEqual(CHARGE_SETTINGS_DEFS["voltage_delta_max"][3], 1.0)
 
 
 if __name__ == '__main__':

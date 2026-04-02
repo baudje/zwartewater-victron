@@ -26,7 +26,11 @@ class TempBatteryService:
         self._registered = False
 
     def register(self, charge_voltage, charge_current, discharge_current=0):
-        """Launch the temp battery service subprocess."""
+        """Launch the temp battery service subprocess.
+
+        Returns True only if the subprocess is still alive after startup.
+        D-Bus discovery is verified separately by the caller.
+        """
         try:
             self._process = subprocess.Popen(
                 ["python3", PROCESS_SCRIPT, str(charge_voltage), str(charge_current),
@@ -34,15 +38,34 @@ class TempBatteryService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
+            time.sleep(1)
+            if self._process.poll() is not None:
+                output = ""
+                try:
+                    if self._process.stdout is not None:
+                        output = self._process.stdout.read().decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    output = ""
+                log.error(
+                    "Temp battery subprocess exited during startup (code %s)%s",
+                    self._process.returncode,
+                    ": " + output if output else "",
+                )
+                self._process = None
+                self._registered = False
+                return False
+
             self._registered = True
             log.info(
                 "Temp battery subprocess started (PID %d): CVL=%.1fV, CCL=%.1fA",
                 self._process.pid, charge_voltage, charge_current,
             )
-            # Give it time to register on D-Bus
-            time.sleep(3)
+            return True
         except Exception as e:
             log.error("Failed to start temp battery subprocess: %s", e)
+            self._process = None
+            self._registered = False
+            return False
 
     def update_voltage_current(self, voltage, current):
         """Voltage/current updated automatically by the subprocess from SmartShunt."""

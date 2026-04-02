@@ -12,9 +12,12 @@ import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
+from web_auth import ensure_credentials, is_authorized, send_unauthorized
+
 log = logging.getLogger(__name__)
 
 PORT = 8089
+AUTH_REALM = "FLA Charge"
 
 # Shared cache — written by GLib thread, read by HTTP thread
 _cache = {
@@ -31,6 +34,7 @@ _cache = {
     "run_now_requested": False,
     "abort_requested": False,
 }
+_auth_config = None
 
 HTML_PAGE = """<!DOCTYPE html>
 <html>
@@ -253,7 +257,15 @@ class RequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _require_auth(self):
+        if is_authorized(self.headers, _auth_config):
+            return True
+        send_unauthorized(self, AUTH_REALM)
+        return False
+
     def do_GET(self):
+        if not self._require_auth():
+            return
         if self.path == "/" or self.path == "/index.html":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -270,6 +282,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        if not self._require_auth():
+            return
         if self.path == "/api/abort":
             _cache["abort_requested"] = True
             msg = {"message": "Abort requested — will stop at next check cycle"}
@@ -311,6 +325,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def start_web_server():
     """Start the web server in a background thread."""
+    global _auth_config
+    _auth_config = ensure_credentials()
     server = HTTPServer(("0.0.0.0", PORT), RequestHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
