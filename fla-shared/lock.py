@@ -13,6 +13,10 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 LOCK_FILE = "/data/apps/fla-shared/operation.lock"
+SERVICE_MARKERS = {
+    "fla-equalisation": "fla_equalisation.py",
+    "fla-charge": "fla_charge.py",
+}
 
 
 def acquire(service_name):
@@ -22,7 +26,7 @@ def acquire(service_name):
         try:
             info = json.loads(Path(LOCK_FILE).read_text())
             pid = info.get("pid")
-            if pid and _pid_exists(pid):
+            if pid and _pid_exists(pid) and _pid_matches_service(pid, info.get("service")):
                 log.debug("Lock held by %s since %s (PID %s)",
                           info.get("service"), info.get("started"), pid)
                 return False
@@ -70,7 +74,7 @@ def is_locked():
     try:
         info = json.loads(Path(LOCK_FILE).read_text())
         pid = info.get("pid")
-        if pid and not _pid_exists(pid):
+        if pid and (not _pid_exists(pid) or not _pid_matches_service(pid, info.get("service"))):
             return False  # Stale — acquire() will clean it
         return True
     except (json.JSONDecodeError, OSError):
@@ -92,3 +96,18 @@ def _pid_exists(pid):
         return True
     except (OSError, TypeError):
         return False
+
+
+def _pid_matches_service(pid, service_name):
+    """Best-effort check that a live PID still belongs to the expected FLA service."""
+    marker = SERVICE_MARKERS.get(service_name)
+    if not marker:
+        return True
+
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    try:
+        cmdline = proc_cmdline.read_bytes().decode("utf-8", errors="ignore").replace("\x00", " ")
+    except OSError:
+        return True
+
+    return marker in cmdline

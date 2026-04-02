@@ -26,6 +26,7 @@ from fla_equalisation import (
     days_until_next, run_equalisation,
     LAST_EQ_FILE,
 )
+from settings import SETTINGS_DEFS as EQ_SETTINGS_DEFS
 from dbus_status_service import (
     STATE_IDLE, STATE_STOPPING_DRIVER, STATE_DISCONNECTING,
     STATE_EQUALISING, STATE_COOLING_DOWN, STATE_VOLTAGE_MATCHING,
@@ -224,6 +225,69 @@ class TestSafetyGuards(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    def test_temp_service_register_failure_aborts_before_stopping_driver(
+        self, mock_start, mock_stop, mock_lock, mock_unlock
+    ):
+        settings, monitor, status = self._make_mocks()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            mock_tbs.register.return_value = False
+            MockTBS.return_value = mock_tbs
+            result = run_equalisation(settings, monitor, status)
+        self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
+        mock_stop.assert_not_called()
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=False)
+    @patch('fla_equalisation.time')
+    def test_systemcalc_restart_failure_aborts_before_relay_open(
+        self, mock_time, mock_open, mock_start, mock_stop, mock_lock, mock_unlock
+    ):
+        settings, monitor, status = self._make_mocks()
+        monitor.restart_systemcalc = MagicMock(return_value=False)
+        mock_time.sleep = MagicMock()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            mock_tbs.register.return_value = True
+            MockTBS.return_value = mock_tbs
+            result = run_equalisation(settings, monitor, status)
+        self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
+        mock_open.assert_not_called()
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=False)
+    @patch('fla_equalisation.time')
+    def test_bms_switch_confirmation_failure_aborts_before_relay_open(
+        self, mock_time, mock_open, mock_start, mock_stop, mock_lock, mock_unlock
+    ):
+        settings, monitor, status = self._make_mocks()
+        monitor.restart_systemcalc = MagicMock(return_value=True)
+        monitor.wait_for_bms_selection = MagicMock(return_value=False)
+        mock_time.sleep = MagicMock()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            mock_tbs = MagicMock()
+            mock_tbs.register.return_value = True
+            MockTBS.return_value = mock_tbs
+            result = run_equalisation(settings, monitor, status)
+        self.assertFalse(result)
+        self.assertIn(STATE_ERROR, status.states)
+        monitor.wait_for_bms_selection.assert_called_once_with(
+            "com.victronenergy.battery/100", 100
+        )
+        mock_open.assert_not_called()
+
 
 class TestFinallySafety(unittest.TestCase):
     """Test the finally block's delta-aware relay handling."""
@@ -340,6 +404,16 @@ class TestSettings(unittest.TestCase):
         fla_cells = 12
         per_cell = eq_v / fla_cells
         self.assertAlmostEqual(per_cell, 2.625, places=2)
+
+
+class TestSettingsBounds(unittest.TestCase):
+    """Test hard safety bounds match the documented operating envelope."""
+
+    def test_eq_voltage_max_allows_datasheet_range(self):
+        self.assertEqual(EQ_SETTINGS_DEFS["eq_voltage"][3], 32.0)
+
+    def test_reconnect_delta_max_cannot_exceed_safe_limit(self):
+        self.assertEqual(EQ_SETTINGS_DEFS["voltage_delta_max"][3], 1.0)
 
 
 class TestRunEqualisationHappyPath(unittest.TestCase):

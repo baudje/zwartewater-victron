@@ -34,6 +34,8 @@ class MockMonitor:
         self._trojan_soc = kwargs.get('trojan_soc', 85.0)
         self._relay_state = kwargs.get('relay_state', 1)
         self._battery_temp = kwargs.get('battery_temp', 25.0)
+        self._battery_service = kwargs.get('battery_service', "com.victronenergy.battery.aggregate")
+        self._bms_instance = kwargs.get('bms_instance', -1)
         self._relay_set_calls = []
         self._invalidated = False
 
@@ -64,9 +66,10 @@ class MockMonitor:
         return True
 
     def get_battery_service_setting(self):
-        return "com.victronenergy.battery.aggregate"
+        return self._battery_service
 
     def set_battery_service_setting(self, value):
+        self._battery_service = value
         return True
 
     def get_dvcc_max_charge_voltage(self):
@@ -79,12 +82,21 @@ class MockMonitor:
         return self._battery_temp
 
     def get_bms_instance(self):
-        return -1
+        return self._bms_instance
 
     def set_bms_instance(self, instance):
+        self._bms_instance = instance
         return True
 
     def restart_systemcalc(self):
+        return True
+
+    def wait_for_service_instance(self, instance, prefix="com.victronenergy.battery",
+                                  timeout_seconds=10, poll_interval=0.5):
+        return "com.victronenergy.battery.fla_equalisation"
+
+    def wait_for_bms_selection(self, battery_service, bms_instance,
+                               timeout_seconds=5, poll_interval=0.5):
         return True
 
     def invalidate_services(self):

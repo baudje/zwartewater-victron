@@ -129,11 +129,14 @@ def run_equalisation(settings, monitor, status):
         # Step 1: Register temporary battery service at SAFE voltage first
         # (not equalisation voltage — protect LFPs if crash before relay opens)
         temp_service = TempBatteryService(device_instance=100)
-        temp_service.register(
+        if not temp_service.register(
             charge_voltage=28.4,  # Safe LFP voltage — raised to EQ after relay opens
             charge_current=60.0,  # FLA recommended max bulk current
             discharge_current=0,
-        )
+        ):
+            status.update(state=STATE_ERROR)
+            raise_alarm("Failed to start temp battery service", status_service=status)
+            return False
 
         # Step 2: Stop aggregate driver
         status.update(state=STATE_STOPPING_DRIVER)
@@ -145,14 +148,31 @@ def run_equalisation(settings, monitor, status):
 
         # Switch DVCC to our temp battery service
         # systemcalc doesn't discover services registered after boot — restart to rescan
-        monitor.restart_systemcalc()
+        if not monitor.restart_systemcalc():
+            status.update(state=STATE_ERROR)
+            raise_alarm("Failed to restart systemcalc for temp battery discovery", status_service=status)
+            return False
+
+        if not monitor.wait_for_service_instance(100):
+            status.update(state=STATE_ERROR)
+            raise_alarm("Temp battery service instance 100 not discovered on D-Bus", status_service=status)
+            return False
 
         original_battery_service = monitor.get_battery_service_setting()
         original_bms_instance = monitor.get_bms_instance()
         log.info("Saving BatteryService=%s, BmsInstance=%s", original_battery_service, original_bms_instance)
-        monitor.set_battery_service_setting("com.victronenergy.battery/100")
-        monitor.set_bms_instance(100)
-        time.sleep(5)  # Let DVCC switch
+        if not monitor.set_battery_service_setting("com.victronenergy.battery/100"):
+            status.update(state=STATE_ERROR)
+            raise_alarm("Failed to switch BatteryService to temp battery", status_service=status)
+            return False
+        if not monitor.set_bms_instance(100):
+            status.update(state=STATE_ERROR)
+            raise_alarm("Failed to switch BmsInstance to temp battery", status_service=status)
+            return False
+        if not monitor.wait_for_bms_selection("com.victronenergy.battery/100", 100):
+            status.update(state=STATE_ERROR)
+            raise_alarm("DVCC handoff to temp battery was not confirmed", status_service=status)
+            return False
 
         # Step 3: Open relay 2 (disconnect LFP direct path)
         status.update(state=STATE_DISCONNECTING)

@@ -3,6 +3,7 @@
 import dbus
 import logging
 import os
+import time
 
 log = logging.getLogger(__name__)
 
@@ -232,16 +233,51 @@ class DbusMonitor:
         systemcalc doesn't detect services registered after boot — restart forces rescan."""
         import subprocess
         try:
-            subprocess.run(["svc", "-d", "/service/dbus-systemcalc-py"], capture_output=True)
+            down = subprocess.run(["svc", "-d", "/service/dbus-systemcalc-py"], capture_output=True)
+            if down.returncode != 0:
+                log.error("Failed to stop systemcalc: %s", down.stderr.decode())
+                return False
             import time as _time
             _time.sleep(2)
-            subprocess.run(["svc", "-u", "/service/dbus-systemcalc-py"], capture_output=True)
+            up = subprocess.run(["svc", "-u", "/service/dbus-systemcalc-py"], capture_output=True)
+            if up.returncode != 0:
+                log.error("Failed to start systemcalc: %s", up.stderr.decode())
+                return False
             _time.sleep(5)
             log.info("systemcalc restarted for service discovery")
             return True
         except Exception as e:
             log.error("Failed to restart systemcalc: %s", e)
             return False
+
+    def wait_for_service_instance(self, instance, prefix="com.victronenergy.battery",
+                                  timeout_seconds=10, poll_interval=0.5):
+        """Wait until a D-Bus service with the given instance becomes visible."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            service = _find_service(self.bus, prefix, instance)
+            if service:
+                connected = _get_dbus_value(self.bus, service, "/Connected")
+                if connected in (None, 1):
+                    return service
+            time.sleep(poll_interval)
+        log.error("Timed out waiting for %s instance %s", prefix, instance)
+        return None
+
+    def wait_for_bms_selection(self, battery_service, bms_instance,
+                               timeout_seconds=5, poll_interval=0.5):
+        """Wait until BatteryService and BmsInstance reflect the requested handoff."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            if (self.get_battery_service_setting() == battery_service
+                    and self.get_bms_instance() == bms_instance):
+                return True
+            time.sleep(poll_interval)
+        log.error(
+            "Timed out waiting for BatteryService=%s and BmsInstance=%s",
+            battery_service, bms_instance,
+        )
+        return False
 
     def get_dvcc_max_charge_voltage(self):
         """Read the DVCC system MaxChargeVoltage setting."""

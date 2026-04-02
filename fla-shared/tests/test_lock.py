@@ -47,6 +47,14 @@ class TestAcquire(LockTestBase):
         with patch.object(lock, '_pid_exists', return_value=False):
             self.assertTrue(lock.acquire('fla-equalisation'))
 
+    def test_acquire_clears_lock_when_live_pid_matches_wrong_service(self):
+        info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': os.getpid()})
+        with open(self.lock_file, 'w') as f:
+            f.write(info)
+        with patch.object(lock, '_pid_exists', return_value=True):
+            with patch.object(lock, '_pid_matches_service', return_value=False):
+                self.assertTrue(lock.acquire('fla-equalisation'))
+
     def test_acquire_handles_file_exists_race(self):
         with patch('os.open', side_effect=FileExistsError):
             self.assertFalse(lock.acquire('fla-equalisation'))
@@ -90,6 +98,14 @@ class TestIsLocked(LockTestBase):
             f.write(info)
         with patch.object(lock, '_pid_exists', return_value=False):
             self.assertFalse(lock.is_locked())
+
+    def test_live_pid_wrong_service_returns_false(self):
+        info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': os.getpid()})
+        with open(self.lock_file, 'w') as f:
+            f.write(info)
+        with patch.object(lock, '_pid_exists', return_value=True):
+            with patch.object(lock, '_pid_matches_service', return_value=False):
+                self.assertFalse(lock.is_locked())
 
     def test_corrupt_json_returns_false(self):
         with open(self.lock_file, 'w') as f:
