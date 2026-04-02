@@ -78,6 +78,15 @@ class MockMonitor:
     def get_battery_temperature(self):
         return self._battery_temp
 
+    def get_bms_instance(self):
+        return -1
+
+    def set_bms_instance(self, instance):
+        return True
+
+    def restart_systemcalc(self):
+        return True
+
     def invalidate_services(self):
         self._invalidated = True
 

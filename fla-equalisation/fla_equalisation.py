@@ -123,6 +123,7 @@ def run_equalisation(settings, monitor, status):
     aggregate_stopped = False
     original_dvcc_voltage = None
     original_battery_service = None
+    original_bms_instance = None
 
     try:
         # Step 1: Register temporary battery service at SAFE voltage first
@@ -143,9 +144,14 @@ def run_equalisation(settings, monitor, status):
         aggregate_stopped = True
 
         # Switch DVCC to our temp battery service
+        # systemcalc doesn't discover services registered after boot — restart to rescan
+        monitor.restart_systemcalc()
+
         original_battery_service = monitor.get_battery_service_setting()
-        log.info("Saving BatteryService setting: %s", original_battery_service)
+        original_bms_instance = monitor.get_bms_instance()
+        log.info("Saving BatteryService=%s, BmsInstance=%s", original_battery_service, original_bms_instance)
         monitor.set_battery_service_setting("com.victronenergy.battery/100")
+        monitor.set_bms_instance(100)
         time.sleep(5)  # Let DVCC switch
 
         # Step 3: Open relay 2 (disconnect LFP direct path)
@@ -318,6 +324,13 @@ def run_equalisation(settings, monitor, status):
 
     finally:
         # Restore DVCC settings before anything else
+        if original_bms_instance is not None:
+            try:
+                monitor.set_bms_instance(original_bms_instance)
+                log.info("BmsInstance restored to %s", original_bms_instance)
+            except Exception:
+                log.error("CRITICAL: Failed to restore BmsInstance setting")
+
         if original_battery_service is not None:
             try:
                 monitor.set_battery_service_setting(original_battery_service)
