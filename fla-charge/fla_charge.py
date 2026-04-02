@@ -38,7 +38,7 @@ from dbus_status_service import (
     STATE_RESTARTING_DRIVER, STATE_ERROR,
 )
 from settings import Settings
-from web_server import start_web_server, update_cache, check_run_now, _cache
+from web_server import start_web_server, update_cache, check_run_now, check_abort, clear_abort, _cache
 
 LOG_FILE = "/data/log/fla-charge.log"
 logging.basicConfig(
@@ -205,6 +205,13 @@ def run_charge(settings, monitor, status):
                 status.update(state=STATE_ERROR)
                 return False
 
+            if check_abort():
+                log.warning("Abort requested via web UI during Phase 1")
+                clear_abort()
+                status.update(state=STATE_ERROR)
+                alerting.raise_alarm("FLA charge aborted by operator", status_service=status)
+                return False
+
             if int(elapsed) % 300 < 30:
                 log.info("Phase 1: %.0f min, LFP SoC=%.0f%%, Trojan SoC=%.0f%%, I=%.0fA, max cell=%.3fV",
                          elapsed / 60, lfp_soc or 0, trojan_soc or 0, abs(charge_current or 0), max_cell_v or 0)
@@ -339,6 +346,13 @@ def run_charge(settings, monitor, status):
             if elapsed > abs_timeout:
                 log.warning("Absorption timeout after %.0f min", elapsed / 60)
                 break
+
+            if check_abort():
+                log.warning("Abort requested via web UI during absorption")
+                clear_abort()
+                status.update(state=STATE_ERROR)
+                alerting.raise_alarm("FLA charge aborted by operator", status_service=status)
+                return False
 
             if int(elapsed) % 300 < 30:
                 log.info("Absorption: %.0f min, V=%.1fV, I=%.1fA",
