@@ -35,7 +35,7 @@ from voltage_matching import wait_for_match
 from aggregate_driver import stop as stop_aggregate_driver, start as start_aggregate_driver
 from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock
-from web_server import start_web_server, update_cache, check_run_now, _cache
+from web_server import start_web_server, update_cache, check_run_now, check_abort, clear_abort, _cache
 
 # Logging setup
 LOG_FILE = "/data/log/fla-equalisation.log"
@@ -246,6 +246,13 @@ def run_equalisation(settings, monitor, status):
                 log.warning("Equalisation timeout after %.0f min, current %.1fA",
                     elapsed / 60, abs(i_trojan) if i_trojan else 0)
                 break
+
+            if check_abort():
+                log.warning("Abort requested via web UI")
+                clear_abort()
+                status.update(state=STATE_ERROR)
+                raise_alarm("Equalisation aborted by operator", status_service=status)
+                return False
 
             if int(elapsed) % 300 < 30:
                 log.info("Equalising: %.0f min, V=%.1fV, I=%.1fA",

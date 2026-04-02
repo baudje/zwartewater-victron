@@ -27,6 +27,7 @@ _cache = {
     "days_until_next": None,
     "settings": {},
     "run_now_requested": False,
+    "abort_requested": False,
     "inrush_current": None,
     "reconnect_delta": None,
 }
@@ -103,6 +104,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="card">
   <h2>Control</h2>
   <button class="btn" onclick="runNow()">Run Equalisation Now</button>
+  <button class="btn" id="abortBtn" onclick="abort()" style="background:#4a1010; border-color:#8b2020; display:none;">Abort</button>
   <span id="run_msg" style="margin-left: 8px; color: #8899aa; font-size:0.85em;"></span>
 </div>
 
@@ -159,6 +161,8 @@ function refresh() {
       si("s_soc",d.settings.lfp_soc_min);
       var sel=document.getElementById("s_enabled"); if(sel) sel.value=d.settings.enabled?"1":"0";
     }
+    var ab=document.getElementById("abortBtn");
+    if(ab) ab.style.display=(d.state>0&&d.state<8)?"inline-block":"none";
     document.getElementById("updated").textContent="Updated "+new Date().toLocaleTimeString();
     initialLoad=false;
   }).catch(function(e){
@@ -169,6 +173,14 @@ function refresh() {
 function runNow() {
   if(!confirm("Start FLA equalisation now?\\n(LFP SoC must be >= 95%)")) return;
   fetch("/api/run-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
+    document.getElementById("run_msg").textContent=d.message;
+    setTimeout(refresh,2000);
+  });
+}
+
+function abort() {
+  if(!confirm("Abort equalisation?\\nRelay will only close if voltage delta <= 1V.")) return;
+  fetch("/api/abort",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
     document.getElementById("run_msg").textContent=d.message;
     setTimeout(refresh,2000);
   });
@@ -207,6 +219,17 @@ def check_run_now():
     return False
 
 
+def check_abort():
+    """Check if abort was requested via web UI. Non-destructive read — flag stays set
+    until the running operation sees it and clears it."""
+    return _cache.get("abort_requested", False)
+
+
+def clear_abort():
+    """Clear the abort flag after the operation has handled it."""
+    _cache["abort_requested"] = False
+
+
 class RequestHandler(BaseHTTPRequestHandler):
     """HTTP request handler — reads from cache, no D-Bus calls."""
 
@@ -230,7 +253,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path == "/api/run-now":
+        if self.path == "/api/abort":
+            _cache["abort_requested"] = True
+            msg = {"message": "Abort requested — will stop at next check cycle"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(msg).encode())
+            return
+        elif self.path == "/api/run-now":
             _cache["run_now_requested"] = True
             msg = {"message": "RunNow requested — will start at next check (SoC must be >= 95%)"}
             self.send_response(200)
