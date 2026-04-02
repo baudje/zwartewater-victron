@@ -290,10 +290,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
             try:
                 data = json.loads(body)
-                # Store in cache — the GLib thread will pick it up and write to D-Bus
                 key = data["key"]
                 value = data["value"]
-                _cache.setdefault("pending_settings", {})[key] = value
+                
+                from settings import SETTINGS_DEFS
+                if key not in SETTINGS_DEFS:
+                    raise ValueError("Unknown setting key: " + str(key))
+
+                # Store in cache — the GLib thread will pick it up and write to D-Bus
+                _cache.setdefault("pending_settings", []).append((key, value))
                 # Also update cache immediately so UI sees the change
                 if "settings" in _cache and isinstance(_cache["settings"], dict):
                     _cache["settings"][key] = value

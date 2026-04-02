@@ -287,6 +287,11 @@ def run_equalisation(settings, monitor, status):
             time.sleep(30)
 
         # Step 6: Reduce CVL to float + voltage matching
+        if original_dvcc_voltage is not None:
+            monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
+            log.info("DVCC MaxChargeVoltage restored to %.1fV before matching", original_dvcc_voltage)
+            original_dvcc_voltage = None
+
         status.update(state=STATE_VOLTAGE_MATCHING)
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -444,10 +449,11 @@ class FlaEqualisationService:
         """Write any pending settings from web UI to D-Bus."""
         from settings import SETTINGS_DEFS
 
-        pending = _cache.pop("pending_settings", None)
+        pending = _cache.get("pending_settings", [])
         if not pending:
             return
-        for key, value in pending.items():
+        _cache["pending_settings"] = []
+        for key, value in pending:
             if key not in SETTINGS_DEFS:
                 log.warning("Unknown setting key '%s' — skipped", key)
                 continue
@@ -462,11 +468,17 @@ class FlaEqualisationService:
     def _check(self):
         """Periodic check — called by GLib timer. Returns True to keep running."""
         if self._running:
+            if check_run_now():
+                log.info("RunNow requested while already running — ignored to prevent queueing")
             return True
 
         try:
             # Apply any pending settings from web UI
             self._apply_pending_settings()
+
+            if check_abort():
+                log.info("Abort requested while idle — cleared to prevent queueing")
+                clear_abort()
 
             # Check web UI RunNow button
             if check_run_now():
@@ -480,19 +492,27 @@ class FlaEqualisationService:
                 self._running = True
                 self._failed = False
                 _cache["run_now_requested"] = False  # CRIT-5: Clear flag after eq starts
-                success = False
-                try:
-                    success = run_equalisation(self.settings, self.monitor, self.status)
-                    if success:
-                        log.info("Equalisation run completed successfully")
-                    else:
-                        log.error("Equalisation run failed — check alarms")
+
+                def _worker():
+                    success = False
+                    try:
+                        success = run_equalisation(self.settings, self.monitor, self.status)
+                        if success:
+                            log.info("Equalisation run completed successfully")
+                        else:
+                            log.error("Equalisation run failed — check alarms")
+                            self._failed = True
+                    except Exception as e:
+                        log.exception("Worker thread error: %s", e)
                         self._failed = True
-                finally:
-                    self._running = False
-                    if success:
-                        self._failed = False
-                        self._update_idle_status()
+                    finally:
+                        self._running = False
+                        if success:
+                            self._failed = False
+                            GLib.idle_add(self._update_idle_status)
+
+                import threading
+                threading.Thread(target=_worker, daemon=True).start()
 
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
@@ -502,6 +522,8 @@ class FlaEqualisationService:
 
 def main():
     """Entry point: start persistent service with GLib main loop."""
+    import dbus.mainloop.glib
+    dbus.mainloop.glib.threads_init()
     DBusGMainLoop(set_as_default=True)
 
     log.info("FLA equalisation service starting")

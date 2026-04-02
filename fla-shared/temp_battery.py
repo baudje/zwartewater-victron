@@ -35,21 +35,14 @@ class TempBatteryService:
             self._process = subprocess.Popen(
                 ["python3", PROCESS_SCRIPT, str(charge_voltage), str(charge_current),
                  str(self._trojan_instance)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             time.sleep(1)
             if self._process.poll() is not None:
-                output = ""
-                try:
-                    if self._process.stdout is not None:
-                        output = self._process.stdout.read().decode("utf-8", errors="ignore").strip()
-                except Exception:
-                    output = ""
                 log.error(
-                    "Temp battery subprocess exited during startup (code %s)%s",
+                    "Temp battery subprocess exited during startup (code %s)",
                     self._process.returncode,
-                    ": " + output if output else "",
                 )
                 self._process = None
                 self._registered = False

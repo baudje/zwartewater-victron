@@ -108,9 +108,16 @@ def main():
     def update_from_file():
         """Check for CVL update from parent process."""
         nonlocal trojan_service
+        
+        # Prevent zombie process if parent dies
+        if os.getppid() == 1:
+            log.error("Parent process died, exiting to prevent stuck DVCC limits")
+            sys.exit(1)
+
         try:
             if os.path.exists(cvl_file):
-                new_cvl = float(open(cvl_file).read().strip())
+                with open(cvl_file) as f:
+                    new_cvl = float(f.read().strip())
                 if new_cvl != svc["/Info/MaxChargeVoltage"]:
                     svc["/Info/MaxChargeVoltage"] = new_cvl
                     log.info("CVL updated to %.2fV", new_cvl)
