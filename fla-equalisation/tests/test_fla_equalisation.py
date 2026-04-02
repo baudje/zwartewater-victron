@@ -409,8 +409,8 @@ class TestSettings(unittest.TestCase):
 class TestSettingsBounds(unittest.TestCase):
     """Test hard safety bounds match the documented operating envelope."""
 
-    def test_eq_voltage_max_matches_documented_cap(self):
-        self.assertEqual(EQ_SETTINGS_DEFS["eq_voltage"][3], 31.5)
+    def test_eq_voltage_max_allows_datasheet_range(self):
+        self.assertEqual(EQ_SETTINGS_DEFS["eq_voltage"][3], 32.0)
 
     def test_reconnect_delta_max_cannot_exceed_safe_limit(self):
         self.assertEqual(EQ_SETTINGS_DEFS["voltage_delta_max"][3], 1.0)

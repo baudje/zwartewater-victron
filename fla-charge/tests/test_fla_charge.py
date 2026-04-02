@@ -518,8 +518,8 @@ class TestPhase1Transitions(unittest.TestCase):
 class TestSettingsBounds(unittest.TestCase):
     """Test hard safety bounds match the documented operating envelope."""
 
-    def test_bulk_voltage_max_matches_documented_target(self):
-        self.assertEqual(CHARGE_SETTINGS_DEFS["fla_bulk_voltage"][3], 29.64)
+    def test_bulk_voltage_max_allows_temp_compensation_headroom(self):
+        self.assertEqual(CHARGE_SETTINGS_DEFS["fla_bulk_voltage"][3], 30.5)
 
     def test_reconnect_delta_max_cannot_exceed_safe_limit(self):
         self.assertEqual(CHARGE_SETTINGS_DEFS["voltage_delta_max"][3], 1.0)

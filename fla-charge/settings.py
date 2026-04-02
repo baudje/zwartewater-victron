@@ -18,7 +18,7 @@ SETTINGS_DEFS = {
     "lfp_soc_transition": ("/Settings/FlaCharge/LfpSocTransition", 95, 50, 100),
     "lfp_cell_voltage_disconnect": ("/Settings/FlaCharge/LfpCellVoltageDisconnect", 3.50, 3.30, 3.65),
     "current_taper_threshold": ("/Settings/FlaCharge/CurrentTaperThreshold", 20.0, 5.0, 60.0),
-    "fla_bulk_voltage": ("/Settings/FlaCharge/FlaBulkVoltage", 29.64, 28.0, 29.64),
+    "fla_bulk_voltage": ("/Settings/FlaCharge/FlaBulkVoltage", 29.64, 28.0, 30.5),
     "fla_absorption_complete_current": ("/Settings/FlaCharge/FlaAbsorptionCompleteCurrent", 10.0, 2.0, 50.0),
     "fla_absorption_max_hours": ("/Settings/FlaCharge/FlaAbsorptionMaxHours", 4.0, 0.5, 12.0),
     "fla_float_voltage": ("/Settings/FlaCharge/FlaFloatVoltage", 27.0, 24.0, 30.0),
