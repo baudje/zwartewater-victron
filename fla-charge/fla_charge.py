@@ -38,7 +38,15 @@ from dbus_status_service import (
     STATE_RESTARTING_DRIVER, STATE_ERROR,
 )
 from settings import Settings
-from web_server import start_web_server, update_cache, check_run_now, check_abort, clear_abort, _cache
+from web_server import (
+    start_web_server,
+    update_cache,
+    check_run_now,
+    check_abort,
+    clear_abort,
+    drain_pending_settings,
+    _cache,
+)
 
 LOG_FILE = "/data/log/fla-charge.log"
 logging.basicConfig(
@@ -529,9 +537,9 @@ class FlaChargeService:
 
     def _apply_pending_settings(self):
         from settings import SETTINGS_DEFS
-        pending = _cache.get("pending_settings", [])
-        if not pending: return
-        _cache["pending_settings"] = []
+        pending = drain_pending_settings()
+        if not pending:
+            return
         for key, value in pending:
             if key not in SETTINGS_DEFS:
                 log.warning("Unknown setting key '%s' — skipped", key)

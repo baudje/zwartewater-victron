@@ -35,7 +35,15 @@ from voltage_matching import wait_for_match
 from aggregate_driver import stop as stop_aggregate_driver, start as start_aggregate_driver
 from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock
-from web_server import start_web_server, update_cache, check_run_now, check_abort, clear_abort, _cache
+from web_server import (
+    start_web_server,
+    update_cache,
+    check_run_now,
+    check_abort,
+    clear_abort,
+    drain_pending_settings,
+    _cache,
+)
 
 # Logging setup
 LOG_FILE = "/data/log/fla-equalisation.log"
@@ -449,10 +457,9 @@ class FlaEqualisationService:
         """Write any pending settings from web UI to D-Bus."""
         from settings import SETTINGS_DEFS
 
-        pending = _cache.get("pending_settings", [])
+        pending = drain_pending_settings()
         if not pending:
             return
-        _cache["pending_settings"] = []
         for key, value in pending:
             if key not in SETTINGS_DEFS:
                 log.warning("Unknown setting key '%s' — skipped", key)
