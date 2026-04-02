@@ -89,17 +89,18 @@ Aligned [dbus-serialbattery](https://github.com/Louisvdw/dbus-serialbattery) con
 
 ### 3. FLA Equalisation Service (`fla-equalisation/`)
 
-Automated Trojan L16H-AC equalisation. Runs as a persistent daemontools service on Venus OS. Web dashboard at **http://venus.local:8088**.
+Automated Trojan L16H-AC equalisation. Runs as a persistent daemontools service on Venus OS. Web dashboard at **http://venus.local:8088** with Run Now and Abort buttons.
 
 - Equalisation every 90 days at 31.5V (temperature-compensated per Trojan datasheet)
 - Exit criteria: bus voltage >= 31.4V AND current < 10A
 - CCL = 60A to protect FLA bank
 - LFP isolation via relay 2, Orion DC-DC maintains LFP charge
 - Voltage matching (delta <= 1V) before reconnecting to limit inrush current
+- Abort button for safe cancellation (relay only closes if delta <= 1V)
 
 ### 4. FLA Charge Service (`fla-charge/`)
 
-Automated Trojan FLA bulk+absorption charge. Runs as a persistent daemontools service on Venus OS. Web dashboard at **http://venus.local:8089**.
+Automated Trojan FLA bulk+absorption charge. Runs as a persistent daemontools service on Venus OS. Web dashboard at **http://venus.local:8089** with Run Now and Abort buttons.
 
 - Triggers when Trojan SoC < 85% and AC input available
 - Phase 1: shared charging (both banks on bus) until LFP is full

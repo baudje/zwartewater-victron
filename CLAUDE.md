@@ -32,13 +32,15 @@ Both FLA services follow the same orchestration pattern:
 Normal:       aggregate/99 active, relay closed, CVL 28.4V
     ↓ register temp battery at 28.4V (SAFE — aggregate still wins by lower instance)
     ↓ stop aggregate driver
+    ↓ restart systemcalc (forces discovery of temp service)
+    ↓ switch BatteryService + BmsInstance to temp/100
 Transitioning: temp/100 at 28.4V, relay closed (still safe for both banks)
     ↓ open relay 2 (LFPs disconnect, Orion activates)
 Disconnected: temp/100 at 28.4V, relay open, LFPs on Orion
     ↓ raise CVL to target (31.5V EQ or 29.64V absorption)
 Charging:     temp/100 at high voltage, relay open, only FLA charging
-    ↓ set CVL to 27.0V float — relay closes when delta < 1V
-Reconnecting: close relay, restart aggregate
+    ↓ lower CVL to 27.0V float, wait for delta <= 1V
+Reconnecting: close relay, restart aggregate, restore BmsInstance
 ```
 
 **Crash safety**: at every stage, if the service dies the system is in a safe state — temp battery defaults to 28.4V (safe for LFPs), and if relay was open the LFPs stay on Orion.
@@ -50,14 +52,14 @@ Reconnecting: close relay, restart aggregate
 ### D-Bus Service Names
 
 - Status services register as `com.victronenergy.fla_equalisation` / `com.victronenergy.fla_charge` (custom prefix — not visible on Device List but avoids introspection issues with `battery` or `genset` prefixes)
-- Web dashboards at ports 8088/8089 are the primary monitoring interface
+- Web dashboards at ports 8088/8089 are the primary monitoring interface (Run Now + Abort buttons)
 
 ### Shared Modules (`fla-shared/`)
 
 | Module | Purpose |
 |--------|---------|
 | `relay_control.py` | Open/close relay 2 with read-back verification, delta-aware cleanup, startup recovery |
-| `voltage_matching.py` | Sets CVL to float then polls delta every 30s; relay closes when < 1V |
+| `voltage_matching.py` | Sets CVL to float then polls delta every 30s; relay closes when <= 1V |
 | `temp_battery.py` | Launches temp battery subprocess |
 | `temp_battery_process.py` | Standalone D-Bus battery service, reads SmartShunt Trojan, watches CVL file |
 | `temp_compensation.py` | Trojan temp compensation: ±0.005V/cell/°C (±0.06V/°C for 12 cells) |
@@ -84,9 +86,12 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - Daily charge at 3.55V/cell, balancing at 3.60V/cell every 14 days
 - FLA equalisation at 31.5V every 90 days (Trojan datasheet max 32.4V, capped for safety), CCL 60A
 - FLA absorption at 29.64V when Trojan SoC < 85% (Trojan datasheet: 2.47V/cell × 12), CCL 60A
-- Voltage matching (delta < 1V) required before reconnecting LFP bank (limits inrush current)
+- Voltage matching (delta <= 1V) required before reconnecting LFP bank (limits inrush current)
 - Float reduction and voltage matching are one phase: `wait_for_match()` sets CVL to float then checks delta
-- Relay re-verified every 30s during high-voltage phases to catch external closes
+- Relay re-verified every 30s during high-voltage phases using temp-compensated CVL
+- DVCC uses `BmsInstance` (not `BatteryService`) to select which BMS provides CVL/CCL/DCL
+- systemcalc must be restarted after registering temp battery service (doesn't discover services registered after boot)
+- Web dashboards have Abort button (visible during active operations, triggers safe cleanup via finally block)
 - Delta-aware cleanup: `finally` block only closes relay if delta < 1V; otherwise alarms and leaves LFPs on Orion
 - Temperature compensation adjusts all target voltages per Trojan datasheet (reads from JK BMS sensor)
 - All settings exposed via Venus OS D-Bus settings and web UIs
