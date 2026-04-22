@@ -78,6 +78,10 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - `install.sh` — Venus OS installer (daemontools service + rc.local)
 - `service/run` — daemontools runner script
 
+### Duplication Between Services
+
+The DVCC handoff sequence (temp battery registration → aggregate stop → systemcalc restart → BMS switch → relay open), the finally/cleanup block, `_check()` + worker thread pattern, `web_server.py` infrastructure, and `settings.py` base methods are duplicated between fla-charge and fla-equalisation. This is intentional — the two services have different state enums, scheduling logic, and charging phases, so the cost of extracting shared abstractions outweighs the benefit for exactly two consumers. **When modifying any of these shared patterns, always apply the same change to both services.**
+
 ## Key Design Decisions
 
 - JK BMS current is inaccurate → use `CURRENT_FROM_VICTRON = True` with SmartShunt LFP

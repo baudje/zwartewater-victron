@@ -9,6 +9,7 @@ Checks conditions every 60 seconds, visible on Cerbo GUI Device List.
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -518,7 +519,6 @@ class FlaEqualisationService:
                             self._failed = False
                             GLib.idle_add(self._update_idle_status)
 
-                import threading
                 threading.Thread(target=_worker, daemon=True).start()
 
         except Exception as e:
