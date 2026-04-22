@@ -83,7 +83,11 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - JK BMS current is inaccurate → use `CURRENT_FROM_VICTRON = True` with SmartShunt LFP
 - `OWN_SOC = False` — serialbattery SoC resets at each daily charge cycle; own counter drifts
 - `OWN_CHARGE_PARAMETERS = False` — serialbattery controls Bulk/Absorption/Float transitions
+- `KEEP_MAX_CVL = True` — when one pack wants Float and the other Absorption, aggregate picks the higher CVL so the slower pack can finish. With False, whichever pack tail-currented first dragged the bus to 27V and cut the other short
 - Daily charge at 3.55V/cell, balancing at 3.60V/cell every 14 days
+- `SWITCH_TO_FLOAT_WAIT_FOR_SEC = 1800` — hold 28.4V absorption for 30 min after tail current before dropping to float. Default 5 min was too brief for both packs' JK BMS full-charge detection to fire and for SmartShunt 277 charged-detection to sync
+- `SWITCH_TO_BULK_SOC_THRESHOLD = 95` — rebulk at 95% SoC (default 80% left the pack drifting 80-95% without any daily absorption opportunity, missing SoC-reset events entirely)
+- JK BMS `SOC-100% Volt` set to 3.545V and `Cell OVPR` lowered correspondingly (JK requires OVPR < SOC-100%). App-side settings on each JK, not in config.ini. JK's internal SoC only resets to 100% when every cell reaches this threshold; default 3.595V was unreachable at our 3.55V daily charge target, so SoC never synced between 14-day balance cycles
 - FLA equalisation at 31.5V every 90 days (Trojan datasheet max 32.4V, capped for safety), CCL 60A
 - FLA absorption at 29.64V when Trojan SoC < 85% (Trojan datasheet: 2.47V/cell × 12), CCL 60A
 - Voltage matching (delta <= 1V) required before reconnecting LFP bank (limits inrush current)
