@@ -13,9 +13,12 @@ driver cannot see.
   upstream updates can be rebased without scping the old version off the Cerbo.
 - `settings.py`, `dbus-aggregate-batteries.py`, `config.default.ini` — patched
   versions deployed to the Cerbo.
-- `verify-patches.sh` — Cerbo-side script that greps for the `[Zwartewater patch]`
-  marker in deployed files and warns to syslog if missing (see "Catching upstream
-  overwrites" below).
+- `verify-patches.sh` — Cerbo-side script that greps for the *behavioural*
+  identifiers introduced by these patches (`get_smartshunts_from_config`,
+  `SMARTSHUNT_AS_BATTERY_CURRENT`) and warns to syslog if any are missing.
+  Checking for behaviour rather than a marker comment means the script stays
+  green if upstream merges our PRs and the same identifiers arrive via a
+  fresh download. See "Catching upstream overwrites" below.
 
 ## What the patches change
 
@@ -86,10 +89,23 @@ the pre-patch state in case of emergency revert.
 
 ## Catching upstream overwrites automatically
 
-`verify-patches.sh` greps for the `[Zwartewater patch]` marker in each
-deployed file and writes a warning to syslog + `/data/var/zwartewater-patches.status`
-if any are missing. Install it as a boot hook so every Cerbo restart
-re-checks (Venus OS preserves `/data/rc.local` across firmware updates):
+`verify-patches.sh` greps each deployed file for the **behavioural identifiers**
+introduced by these patches (`get_smartshunts_from_config` in `settings.py`,
+`SMARTSHUNT_AS_BATTERY_CURRENT` in all three files). It writes a warning to
+syslog + `/data/var/zwartewater-patches.status` if any are missing.
+
+Behaviour-based checking (rather than grepping for a `[Zwartewater patch]`
+marker comment) means the script stays green in two cases:
+
+- our local patches are deployed (the identifiers were added by us), and
+- upstream eventually merges PRs #152/#154 and the identifiers arrive via
+  a pristine driver download.
+
+It only flips red when the behaviour is genuinely missing (e.g. a firmware
+update reverted to a pre-merge upstream version).
+
+Install as a boot hook so every Cerbo restart re-checks (Venus OS preserves
+`/data/rc.local` across firmware updates):
 
 ```bash
 sshpass -p "$CERBO_ROOT_PASSWORD" scp \

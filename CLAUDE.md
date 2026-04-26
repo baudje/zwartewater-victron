@@ -136,8 +136,16 @@ sshpass -p "$CERBO_ROOT_PASSWORD" scp \
   patches/dbus-aggregate-batteries/settings.py \
   patches/dbus-aggregate-batteries/dbus-aggregate-batteries.py \
   patches/dbus-aggregate-batteries/config.default.ini \
+  patches/dbus-aggregate-batteries/verify-patches.sh \
   root@venus.local:/data/apps/dbus-aggregate-batteries/
-sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '/data/apps/dbus-aggregate-batteries/restart.sh'
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '
+  chmod +x /data/apps/dbus-aggregate-batteries/verify-patches.sh
+  # Idempotent: only register the boot hook on first install
+  grep -q zwartewater-patches /data/rc.local 2>/dev/null || \
+    echo "/data/apps/dbus-aggregate-batteries/verify-patches.sh &" >> /data/rc.local
+  chmod +x /data/rc.local
+  /data/apps/dbus-aggregate-batteries/restart.sh
+'
 ```
 
 ### FLA Services (deploy via sshpass)
