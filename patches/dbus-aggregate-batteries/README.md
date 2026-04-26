@@ -8,9 +8,14 @@ driver cannot see.
 ## Files
 
 - `*.orig` — pristine upstream files pulled from `/data/apps/dbus-aggregate-batteries/`
-  on the Cerbo. Used as a baseline for diffing.
+  on the Cerbo at the time the patches were authored. Committed so the patch
+  hunks can be reviewed via `diff -u settings.py.orig settings.py` and so future
+  upstream updates can be rebased without scping the old version off the Cerbo.
 - `settings.py`, `dbus-aggregate-batteries.py`, `config.default.ini` — patched
   versions deployed to the Cerbo.
+- `verify-patches.sh` — Cerbo-side script that greps for the `[Zwartewater patch]`
+  marker in deployed files and warns to syslog if missing (see "Catching upstream
+  overwrites" below).
 
 ## What the patches change
 
@@ -64,14 +69,49 @@ sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local \
 
 ## Re-applying after upstream updates
 
-When the upstream driver gets updated on the Cerbo (e.g. via the driver's
-own update mechanism), these local edits will be overwritten. To re-apply:
+**A Venus OS firmware update or a driver self-update will silently revert
+these patches** — the upstream files in `/data/apps/dbus-aggregate-batteries/`
+get replaced by pristine upstream code, and aggregate's reported current
+goes back to `Quattro + MPPT` (alternator invisible again). To re-apply:
 
 1. Pull the new upstream files into this directory as `*.orig`.
 2. Diff `*.orig` against the patched versions to see if upstream now does
    what we want, or if there are conflicts.
 3. Re-apply the patches (manually, since they're small) or update the
    patched files to match the new upstream baseline.
+4. Re-deploy with the snippet under "Deploying" above.
 
 The `.preZwbackup` files on the Cerbo (created on first deploy) preserve
 the pre-patch state in case of emergency revert.
+
+## Catching upstream overwrites automatically
+
+`verify-patches.sh` greps for the `[Zwartewater patch]` marker in each
+deployed file and writes a warning to syslog + `/data/var/zwartewater-patches.status`
+if any are missing. Install it as a boot hook so every Cerbo restart
+re-checks (Venus OS preserves `/data/rc.local` across firmware updates):
+
+```bash
+sshpass -p "$CERBO_ROOT_PASSWORD" scp \
+  patches/dbus-aggregate-batteries/verify-patches.sh \
+  root@venus.local:/data/apps/dbus-aggregate-batteries/
+
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '
+  grep -q zwartewater-patches /data/rc.local 2>/dev/null || \
+    echo "/data/apps/dbus-aggregate-batteries/verify-patches.sh &" >> /data/rc.local
+  chmod +x /data/rc.local /data/apps/dbus-aggregate-batteries/verify-patches.sh
+'
+```
+
+After install, run it manually to baseline the status file:
+```bash
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local \
+  '/data/apps/dbus-aggregate-batteries/verify-patches.sh; cat /data/var/zwartewater-patches.status'
+```
+
+Check status after any firmware update or before troubleshooting weird
+current readings:
+```bash
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local \
+  'cat /data/var/zwartewater-patches.status'
+```
