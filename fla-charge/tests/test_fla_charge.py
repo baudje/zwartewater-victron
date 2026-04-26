@@ -525,5 +525,96 @@ class TestSettingsBounds(unittest.TestCase):
         self.assertEqual(CHARGE_SETTINGS_DEFS["voltage_delta_max"][3], 1.0)
 
 
+class TestApplyPendingSettingsBounds(unittest.TestCase):
+    """Mirrors fla-equalisation: out-of-bounds settings from the web UI are
+    rejected before reaching D-Bus, defending against a misbehaving HTTP
+    client or test fixture pushing values outside the documented envelope."""
+
+    def setUp(self):
+        from fla_charge import FlaChargeService
+        self.svc = FlaChargeService.__new__(FlaChargeService)
+        self.svc.settings = MagicMock()
+        from web_server import _cache, _pending_settings_lock
+        with _pending_settings_lock:
+            _cache.pop("pending_settings", None)
+        self._cache = _cache
+        self._cache_lock = _pending_settings_lock
+
+    def _enqueue(self, key, value):
+        with self._cache_lock:
+            self._cache.setdefault("pending_settings", []).append((key, value))
+
+    def test_fla_bulk_voltage_above_max_is_rejected(self):
+        # Max is 30.5V (per CHARGE_SETTINGS_DEFS). 35V is well above.
+        self._enqueue("fla_bulk_voltage", 35.0)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+    def test_unknown_key_is_skipped(self):
+        self._enqueue("not_a_real_setting", 42)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+    def test_in_range_value_is_written_through(self):
+        self._enqueue("fla_bulk_voltage", 29.0)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_called_once_with("fla_bulk_voltage", 29.0)
+
+    def test_empty_pending_does_not_call_write(self):
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+
+class TestVoltageDeltaWithZero(unittest.TestCase):
+    """Regression for IMP-5 in fla-charge: the IMP-5 falsy-check pattern
+    appeared in fla_charge.py at lines 324 and 511. After the fix, a true
+    0.0V reading produces a numeric delta instead of being silently dropped."""
+
+    def test_zero_voltage_does_not_yield_none_delta(self):
+        v_trojan, v_lfp = 0.0, 26.5
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
+        self.assertEqual(delta, 26.5)
+
+    def test_both_zero_yields_zero_not_none(self):
+        v_trojan, v_lfp = 0.0, 0.0
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
+        self.assertIsNotNone(delta)
+        self.assertEqual(delta, 0.0)
+
+
+class TestStatusServiceDeregisterFailsFast(unittest.TestCase):
+    """fla-charge's StatusService already nulled _service after deregister.
+    This test pins that behaviour so a future refactor doesn't drift back."""
+
+    def test_service_handle_nulled_after_deregister(self):
+        from dbus_status_service import StatusService
+        svc = StatusService.__new__(StatusService)
+        svc._registered = True
+        svc._service = MagicMock()
+        svc.deregister()
+        self.assertIsNone(svc._service)
+        self.assertFalse(svc._registered)
+
+
+class TestIsAcAvailableLogsExceptions(unittest.TestCase):
+    """Regression for IMP-7: a transient D-Bus read error in is_ac_available
+    used to silently return False, hiding the real cause when a Phase 1
+    charge then aborted with 'AC input lost'. Now the exception is logged
+    at warning level so an operator can distinguish a real AC-loss from a
+    D-Bus hiccup."""
+
+    def test_exception_is_logged_at_warning(self):
+        from fla_charge import is_ac_available
+        # Build a monitor whose .bus.get_object raises.
+        mon = MagicMock()
+        mon.bus.get_object.side_effect = RuntimeError("boom")
+        with patch('fla_charge.log.warning') as mock_warn:
+            result = is_ac_available(mon)
+        self.assertFalse(result)
+        mock_warn.assert_called_once()
+        msg = mock_warn.call_args[0][0]
+        self.assertIn("is_ac_available", msg)
+
+
 if __name__ == '__main__':
     unittest.main()

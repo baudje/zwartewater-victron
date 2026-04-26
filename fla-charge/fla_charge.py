@@ -71,7 +71,13 @@ def write_last_charge():
 
 
 def is_ac_available(monitor):
-    """Check if AC input is active (shore power or generator)."""
+    """Check if AC input is active (shore power or generator).
+
+    Returns False on any read failure so the caller treats "unknown" as
+    "no AC" — but logs the exception at warning level so an operator can
+    distinguish a genuine AC-loss from a transient D-Bus hiccup when a
+    Phase 1 charge aborts (otherwise the abort is silent on this path).
+    """
     try:
         import dbus
         bus = monitor.bus
@@ -80,7 +86,8 @@ def is_ac_available(monitor):
         value = iface.GetValue()
         # 0 = AC-in-1, 1 = AC-in-2, 240 = disconnected
         return int(value) in (0, 1)
-    except Exception:
+    except Exception as e:
+        log.warning("is_ac_available: failed to read /Ac/ActiveIn/ActiveInput (%s) — treating as no-AC", e)
         return False
 
 
@@ -321,7 +328,7 @@ def run_charge(settings, monitor, status):
                 temp_service.update_voltage_current(v_trojan, i_trojan)
 
             current_state = STATE_PHASE3_ABSORPTION if elapsed > 300 else STATE_PHASE2_BULK
-            delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan and v_lfp) else None
+            delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
             status.update(
                 state=current_state,
                 time_remaining=remaining,
@@ -406,11 +413,16 @@ def run_charge(settings, monitor, status):
         def _vm_cache_cb(**kwargs):
             update_cache(state=STATE_VOLTAGE_MATCHING, **kwargs)
 
+        # Re-read battery temperature: the charge run may have lasted hours and
+        # engine-room temperature can swing 10°C+ over that window. Using the
+        # original battery_temp here would compensate the float target against
+        # a stale environment, hurting voltage-match convergence.
+        float_battery_temp = monitor.get_battery_temperature()
         matched, delta = wait_for_match(
             monitor, temp_service, status, alerting,
             voltage_delta_max=settings.voltage_delta_max,
             timeout_hours=settings.voltage_match_timeout_hours,
-            float_voltage=temp_compensate(settings.fla_float_voltage, battery_temp),
+            float_voltage=temp_compensate(settings.fla_float_voltage, float_battery_temp),
             cache_callback=_vm_cache_cb,
         )
         if not matched:
@@ -508,7 +520,7 @@ class FlaChargeService:
         v_lfp = self.monitor.get_lfp_voltage()
         trojan_soc = self.monitor.get_trojan_soc()
         lfp_soc = self.monitor.get_lfp_soc()
-        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan and v_lfp) else None
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
         self.status.update(
             state=STATE_IDLE, trojan_v=v_trojan, lfp_v=v_lfp,
             trojan_soc=trojan_soc, lfp_soc=lfp_soc,
