@@ -78,12 +78,21 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - `install.sh` — Venus OS installer (daemontools service + rc.local)
 - `service/run` — daemontools runner script
 
+### Duplication Between Services
+
+The DVCC handoff sequence (temp battery registration → aggregate stop → systemcalc restart → BMS switch → relay open), the finally/cleanup block, `_check()` + worker thread pattern, `web_server.py` infrastructure, and `settings.py` base methods are duplicated between fla-charge and fla-equalisation. This is intentional — the two services have different state enums, scheduling logic, and charging phases, so the cost of extracting shared abstractions outweighs the benefit for exactly two consumers. **When modifying any of these shared patterns, always apply the same change to both services.**
+
 ## Key Design Decisions
 
 - JK BMS current is inaccurate → use `CURRENT_FROM_VICTRON = True` with SmartShunt LFP
 - `OWN_SOC = False` — serialbattery SoC resets at each daily charge cycle; own counter drifts
 - `OWN_CHARGE_PARAMETERS = False` — serialbattery controls Bulk/Absorption/Float transitions
+- `KEEP_MAX_CVL = True` — when one pack wants Float and the other Absorption, aggregate picks the higher CVL so the slower pack can finish. With False, whichever pack tail-currented first dragged the bus to 27V and cut the other short
 - Daily charge at 3.55V/cell, balancing at 3.60V/cell every 14 days
+- `SWITCH_TO_FLOAT_WAIT_FOR_SEC = 1800` — hold 28.4V absorption for 30 min after tail current before dropping to float. Default 5 min was too brief for both packs' JK BMS full-charge detection to fire and for SmartShunt 277 charged-detection to sync
+- `SWITCH_TO_BULK_SOC_THRESHOLD = 95` — rebulk at 95% SoC (default 80% left the pack drifting 80-95% without any daily absorption opportunity, missing SoC-reset events entirely)
+- JK BMS `SOC-100% Volt` set to 3.545V and `Cell OVPR` lowered correspondingly (JK requires OVPR < SOC-100%). App-side settings on each JK, not in config.ini. JK's internal SoC only resets to 100% when every cell reaches this threshold; default 3.595V was unreachable at our 3.55V daily charge target, so SoC never synced between 14-day balance cycles
+- `SMARTSHUNT_AS_BATTERY_CURRENT = True` (Zwartewater patch to dbus-aggregate-batteries) — aggregate uses SmartShunt LFP (instance 277) directly as the bank current. Required because (a) upstream `settings.py` parses `USE_SMARTSHUNTS` as bool only, silently coercing `[277]` to `False`, and (b) upstream's formula `Current = Quattro + MPPT + shunts` would double-count what flows into the LFP bank (the shunt already includes Quattro+MPPT contributions). With the patch, alternator charge via Orion DC-DC is finally visible to aggregate (previously invisible because Orion registers as `com.victronenergy.dcdc`, which the driver doesn't sum). See `patches/dbus-aggregate-batteries/README.md`
 - FLA equalisation at 31.5V every 90 days (Trojan datasheet max 32.4V, capped for safety), CCL 60A
 - FLA absorption at 29.64V when Trojan SoC < 85% (Trojan datasheet: 2.47V/cell × 12), CCL 60A
 - Voltage matching (delta <= 1V) required before reconnecting LFP bank (limits inrush current)
@@ -119,6 +128,24 @@ Tests mock D-Bus calls — no Venus OS required. Shared test helpers in `fla-sha
 ```bash
 sshpass -p "$CERBO_ROOT_PASSWORD" scp config/config.ini root@venus.local:/data/apps/dbus-aggregate-batteries/config.ini
 sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '/data/apps/dbus-aggregate-batteries/restart.sh'
+```
+
+### Aggregate driver patches (deploy after upstream updates)
+```bash
+sshpass -p "$CERBO_ROOT_PASSWORD" scp \
+  patches/dbus-aggregate-batteries/settings.py \
+  patches/dbus-aggregate-batteries/dbus-aggregate-batteries.py \
+  patches/dbus-aggregate-batteries/config.default.ini \
+  patches/dbus-aggregate-batteries/verify-patches.sh \
+  root@venus.local:/data/apps/dbus-aggregate-batteries/
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '
+  chmod +x /data/apps/dbus-aggregate-batteries/verify-patches.sh
+  # Idempotent: only register the boot hook on first install
+  grep -q zwartewater-patches /data/rc.local 2>/dev/null || \
+    echo "/data/apps/dbus-aggregate-batteries/verify-patches.sh &" >> /data/rc.local
+  chmod +x /data/rc.local
+  /data/apps/dbus-aggregate-batteries/restart.sh
+'
 ```
 
 ### FLA Services (deploy via sshpass)

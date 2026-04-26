@@ -9,6 +9,7 @@ Runs as a persistent daemontools service with GLib main loop.
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -591,7 +592,6 @@ class FlaChargeService:
                             self._failed = False
                             GLib.idle_add(self._update_idle_status)
 
-                import threading
                 threading.Thread(target=_worker, daemon=True).start()
         except Exception as e:
             log.exception("Error in periodic check: %s", e)
