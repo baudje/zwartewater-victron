@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match Venus OS's interpreter (Cerbo currently ships 3.12).
+          python-version: "3.12"
+
+      - name: Run shared module tests
+        run: python3 -m unittest discover -s fla-shared/tests -v
+
+      - name: Run fla-equalisation tests
+        run: python3 -m unittest discover -s fla-equalisation/tests -v
+
+      - name: Run fla-charge tests
+        run: python3 -m unittest discover -s fla-charge/tests -v
