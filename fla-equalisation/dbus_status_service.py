@@ -137,12 +137,18 @@ class StatusService:
         self._service["/Alarms/Equalisation"] = 0
 
     def deregister(self):
-        """Remove the status service from D-Bus."""
+        """Remove the status service from D-Bus.
+
+        Mirrors fla-charge/dbus_status_service.py: nulls _service so any
+        post-deregister set_alarm/clear_alarm_path/update calls fail fast
+        instead of silently writing to a stale handle.
+        """
         if not self._registered:
             return
         try:
             self._service["/Connected"] = 0
         except Exception as e:
             log.warning("Error deregistering status service: %s", e)
+        self._service = None
         self._registered = False
         log.info("Status service deregistered")

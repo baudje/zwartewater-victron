@@ -47,11 +47,12 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 
 ### Subprocess Isolation Pattern
 
-`temp_battery_process.py` runs as a separate subprocess because the temp D-Bus battery service needs root path `/` which conflicts with the main status service. Parent communicates voltage changes via file `/tmp/fla_eq_cvl` (polled every 2s by subprocess).
+`temp_battery_process.py` runs as a separate subprocess because the temp D-Bus battery service needs root path `/` which conflicts with the main status service. Parent communicates voltage changes via file `/tmp/fla_temp_cvl` (polled every 2s by subprocess). The subprocess registers under the **service-neutral** name `com.victronenergy.battery.fla_temp` (display "FLA Temp Battery") so logs and the GUI stay accurate whether the active consumer is fla-equalisation or fla-charge — the lock guarantees they never run concurrently, so a single shared registration is safe.
 
 ### D-Bus Service Names
 
 - Status services register as `com.victronenergy.fla_equalisation` / `com.victronenergy.fla_charge` (custom prefix — not visible on Device List but avoids introspection issues with `battery` or `genset` prefixes)
+- Temp battery service (used during EQ + charge handoffs): `com.victronenergy.battery.fla_temp`, instance 100, display "FLA Temp Battery". Shared by both services via the file lock.
 - Web dashboards at ports 8088/8089 are the primary monitoring interface (Run Now + Abort buttons)
 
 ### Shared Modules (`fla-shared/`)
@@ -108,10 +109,10 @@ The DVCC handoff sequence (temp battery registration → aggregate stop → syst
 ## Testing
 
 ```bash
-# Run all tests (137 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 82 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 33 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 22 tests — charge service
+# Run all tests (184 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 96 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 51 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v

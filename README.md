@@ -264,16 +264,16 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 ## Testing
 
 ```bash
-# Run all tests (148 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 90 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 34 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 24 tests — charge service
+# Run all tests (184 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 96 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 51 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-148 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver), EQ scheduling/safety/happy path/Orion failure/RunNow preservation, and charge scheduling/phase transitions/safety guards/taper detection.
+184 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging.
 
 ## Files
 
@@ -297,7 +297,7 @@ zwartewater-victron/
 |   +-- alerting.py                 # Buzzer + alarm
 |   +-- lock.py                     # Atomic file-based operation lock
 |   +-- aggregate_driver.py         # Start/stop aggregate batteries
-|   +-- tests/                      # 90 unit tests for shared modules
+|   +-- tests/                      # 96 unit tests for shared modules
 +-- fla-equalisation/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
@@ -306,7 +306,7 @@ zwartewater-victron/
 |   +-- settings.py                 # Venus OS settings integration
 |   +-- web_server.py               # Web dashboard (port 8088)
 |   +-- service/run                 # Daemontools service runner
-|   +-- tests/                      # 34 unit tests
+|   +-- tests/                      # 51 unit tests
 +-- fla-charge/
     +-- install.sh                  # Venus OS installer
     +-- fla_charge.py               # Main charge service
@@ -314,7 +314,7 @@ zwartewater-victron/
     +-- settings.py                 # Venus OS settings integration
     +-- web_server.py               # Web dashboard (port 8089)
     +-- service/run                 # Daemontools service runner
-    +-- tests/                      # 24 unit tests
+    +-- tests/                      # 37 unit tests
 ```
 
 ## References

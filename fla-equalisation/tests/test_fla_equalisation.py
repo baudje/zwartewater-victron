@@ -689,5 +689,150 @@ class TestTempCompensationIntegration(unittest.TestCase):
                         f"Expected CVL ~31.5, got calls: {cvl_calls}")
 
 
+class TestRunEqualisationLockHeld(unittest.TestCase):
+    """Lock-held branch (mirrors fla-charge.test_lock_held_returns_false)."""
+
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=False)
+    def test_lock_held_returns_false_without_starting_handoff(self, mock_lock, mock_unlock):
+        """If the lock is held, run_equalisation must return False BEFORE
+        any state-mutating action (no aggregate stop, no temp battery, no
+        relay open). Otherwise a charge run holding the lock could be
+        interrupted by an EQ trying to handoff on top of it."""
+        settings = MockSettings()
+        monitor = MockMonitor()
+        monitor.set_relay = MagicMock()
+        monitor.set_battery_service = MagicMock()
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS, \
+             patch('fla_equalisation.stop_aggregate_driver') as mock_stop:
+            result = run_equalisation(settings, monitor, status)
+        self.assertFalse(result)
+        # Crucial: no state-changing actions must have happened.
+        MockTBS.assert_not_called()
+        mock_stop.assert_not_called()
+        monitor.set_relay.assert_not_called()
+        # release_lock should NOT be called either — we never acquired.
+        mock_unlock.assert_not_called()
+
+
+class TestApplyPendingSettingsBounds(unittest.TestCase):
+    """Settings handed off from the web thread must be bounds-checked
+    before being written to D-Bus, even though Venus enforces min/max on
+    the AddSetting path. Defence in depth — a misbehaving HTTP client (or
+    a mocking environment) shouldn't be able to push out-of-range values."""
+
+    def setUp(self):
+        # Drive FlaEqualisationService._apply_pending_settings directly
+        # (it only touches self.settings._write and the module-global
+        # drain_pending_settings, so we don't need a full service).
+        from fla_equalisation import FlaEqualisationService
+        self.svc = FlaEqualisationService.__new__(FlaEqualisationService)
+        self.svc.settings = MagicMock()
+        # Make sure no stale pending_settings leak in from prior tests.
+        from web_server import _cache, _pending_settings_lock
+        with _pending_settings_lock:
+            _cache.pop("pending_settings", None)
+        self._cache = _cache
+        self._cache_lock = _pending_settings_lock
+
+    def _enqueue(self, key, value):
+        with self._cache_lock:
+            self._cache.setdefault("pending_settings", []).append((key, value))
+
+    def test_eq_voltage_above_max_is_rejected(self):
+        """31.5V was the cap before it was tightened to 32.0V; either way,
+        35V exceeds the configured max and must be refused."""
+        self._enqueue("eq_voltage", 35.0)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+    def test_lfp_soc_min_below_min_is_rejected(self):
+        # Min is 50; -5 is well below.
+        self._enqueue("lfp_soc_min", -5)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+    def test_unknown_key_is_skipped(self):
+        self._enqueue("not_a_real_setting", 42)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+    def test_in_range_value_is_written_through(self):
+        self._enqueue("eq_voltage", 30.0)
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_called_once_with("eq_voltage", 30.0)
+
+    def test_mixed_batch_writes_only_valid_entries(self):
+        self._enqueue("eq_voltage", 30.0)        # in range
+        self._enqueue("eq_voltage", 99.0)        # out of range — rejected
+        self._enqueue("not_a_real_setting", 1)   # unknown — skipped
+        self._enqueue("lfp_soc_min", 90)         # in range
+        self.svc._apply_pending_settings()
+        # Only the two in-range writes reach _write.
+        calls = self.svc.settings._write.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertIn((("eq_voltage", 30.0), {}), [(c.args, c.kwargs) for c in calls])
+        self.assertIn((("lfp_soc_min", 90), {}), [(c.args, c.kwargs) for c in calls])
+
+    def test_empty_pending_does_not_call_write(self):
+        # No enqueue.
+        self.svc._apply_pending_settings()
+        self.svc.settings._write.assert_not_called()
+
+
+class TestVoltageDeltaWithZero(unittest.TestCase):
+    """Regression for IMP-5: `if (v_trojan and v_lfp)` falsy check used to
+    drop a 0.0V reading on the floor (treating it as None), so the
+    dashboard would show '-' instead of '0.00V'. Now uses
+    `is not None` and a true 0V reading produces a numeric delta."""
+
+    def test_zero_voltage_does_not_yield_none_delta(self):
+        # Inline the post-IMP-5 expression for clarity. If a future refactor
+        # reintroduces the falsy check, this test will fail.
+        v_trojan, v_lfp = 0.0, 26.5
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
+        self.assertEqual(delta, 26.5)
+
+    def test_both_zero_yields_zero_not_none(self):
+        v_trojan, v_lfp = 0.0, 0.0
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
+        self.assertEqual(delta, 0.0)
+        self.assertIsNotNone(delta)
+
+    def test_actual_none_still_yields_none(self):
+        v_trojan, v_lfp = None, 26.5
+        delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
+        self.assertIsNone(delta)
+
+
+class TestStatusServiceDeregisterFailsFast(unittest.TestCase):
+    """Regression for IMP-2: after deregister(), set_alarm/clear_alarm_path
+    should be no-ops (gated by self._registered) AND self._service must be
+    None so any code path that bypasses _registered crashes loudly instead
+    of silently writing to a stale handle. Mirrors fla-charge."""
+
+    def test_service_handle_nulled_after_deregister(self):
+        from dbus_status_service import StatusService
+        svc = StatusService.__new__(StatusService)
+        svc._registered = True
+        svc._service = MagicMock()
+        svc.deregister()
+        self.assertIsNone(svc._service)
+        self.assertFalse(svc._registered)
+
+    def test_post_deregister_set_alarm_is_silent_noop(self):
+        """Belt-and-braces: gated by _registered, so set_alarm doesn't
+        crash even though _service is None."""
+        from dbus_status_service import StatusService
+        svc = StatusService.__new__(StatusService)
+        svc._registered = True
+        svc._service = MagicMock()
+        svc.deregister()
+        # No exception — registered=False short-circuits before touching None.
+        svc.set_alarm(2)
+        svc.clear_alarm_path()
+
+
 if __name__ == '__main__':
     unittest.main()

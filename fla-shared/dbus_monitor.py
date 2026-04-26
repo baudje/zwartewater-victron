@@ -154,9 +154,11 @@ class DbusMonitor:
         )
         if soc is not None:
             return float(soc)
-        # Fallback: try finding any serialbattery service
+        # Fallback: try finding any serialbattery service. Skip our temp battery
+        # service (registered by fla-equalisation/fla-charge during the handoff)
+        # since it doesn't carry an LFP SoC.
         for name in self.bus.list_names():
-            if "fla_equalisation" in str(name):
+            if "fla_temp" in str(name) or "fla_equalisation" in str(name):
                 continue
             if "com.victronenergy.battery" in str(name) and "aggregate" not in str(name):
                 product = _get_dbus_value(self.bus, name, "/ProductName")

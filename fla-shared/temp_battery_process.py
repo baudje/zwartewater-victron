@@ -54,17 +54,21 @@ def main():
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
 
-    svc = VeDbusService("com.victronenergy.battery.fla_equalisation", bus, register=False)
+    # Service-neutral name: shared by both fla-equalisation and fla-charge.
+    # The lock (fla-shared/lock.py) prevents concurrent use, so a single
+    # registration name is sufficient and avoids misleading logs/dashboards
+    # when fla-charge is the active consumer.
+    svc = VeDbusService("com.victronenergy.battery.fla_temp", bus, register=False)
 
     # Management paths
     svc.add_path("/Mgmt/ProcessName", __file__)
     svc.add_path("/Mgmt/ProcessVersion", "Python " + platform.python_version())
-    svc.add_path("/Mgmt/Connection", "FLA Equalisation")
+    svc.add_path("/Mgmt/Connection", "FLA Temp Battery")
 
     # Mandatory paths
     svc.add_path("/DeviceInstance", 100)
     svc.add_path("/ProductId", 0xFE01)
-    svc.add_path("/ProductName", "FLA Equalisation")
+    svc.add_path("/ProductName", "FLA Temp Battery")
     svc.add_path("/FirmwareVersion", "1.0")
     svc.add_path("/HardwareVersion", "1.0")
     svc.add_path("/Connected", 1)
@@ -102,8 +106,9 @@ def main():
     else:
         log.warning("Trojan SmartShunt instance %d not found — voltage/current won't update", trojan_instance)
 
-    # Watch for CVL update file — parent process writes new voltage here
-    cvl_file = "/tmp/fla_eq_cvl"
+    # Watch for CVL update file — parent process writes new voltage here.
+    # Shared between fla-equalisation and fla-charge (lock-protected).
+    cvl_file = "/tmp/fla_temp_cvl"
 
     def update_from_file():
         """Check for CVL update from parent process."""

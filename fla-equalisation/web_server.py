@@ -168,6 +168,7 @@ function refresh() {
       si("s_delta",d.settings.voltage_delta_max); si("s_days",d.settings.days_between);
       si("s_start",d.settings.start_hour); si("s_end",d.settings.end_hour);
       si("s_soc",d.settings.lfp_soc_min);
+      window._lfpSocMin=d.settings.lfp_soc_min;
       var sel=document.getElementById("s_enabled"); if(sel) sel.value=d.settings.enabled?"1":"0";
     }
     var ab=document.getElementById("abortBtn");
@@ -180,7 +181,8 @@ function refresh() {
 }
 
 function runNow() {
-  if(!confirm("Start FLA equalisation now?\\n(LFP SoC must be >= 95%)")) return;
+  var soc=(window._lfpSocMin!=null)?window._lfpSocMin:95;
+  if(!confirm("Start FLA equalisation now?\\n(LFP SoC must be >= "+soc+"%)")) return;
   fetch("/api/run-now",{method:"POST"}).then(function(r){return r.json()}).then(function(d){
     document.getElementById("run_msg").textContent=d.message;
     setTimeout(refresh,2000);
@@ -272,7 +274,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         elif self.path == "/api/run-now":
             _cache["run_now_requested"] = True
-            msg = {"message": "RunNow requested — will start at next check (SoC must be >= 95%)"}
+            soc_min = (_cache.get("settings") or {}).get("lfp_soc_min", 95)
+            msg = {"message": "RunNow requested — will start at next check (SoC must be >= %d%%)" % soc_min}
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

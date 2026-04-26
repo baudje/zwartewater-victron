@@ -12,7 +12,7 @@ import time
 
 log = logging.getLogger(__name__)
 
-CVL_FILE = "/tmp/fla_eq_cvl"
+CVL_FILE = "/tmp/fla_temp_cvl"
 PROCESS_SCRIPT = os.path.join(os.path.dirname(__file__), "temp_battery_process.py")
 
 
