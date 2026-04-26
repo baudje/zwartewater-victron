@@ -72,7 +72,9 @@ class TestDbusMonitorSkipsTempService(unittest.TestCase):
     real serialbattery sitting next to it."""
 
     def test_filter_excludes_fla_temp_name(self):
-        src = open(os.path.join(os.path.dirname(__file__), '..', 'dbus_monitor.py')).read()
+        path = os.path.join(os.path.dirname(__file__), '..', 'dbus_monitor.py')
+        with open(path) as f:
+            src = f.read()
         # The filter must catch the new neutral name.
         self.assertIn('"fla_temp"', src,
                       "dbus_monitor.get_lfp_soc must skip fla_temp service")
