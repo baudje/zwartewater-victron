@@ -92,6 +92,7 @@ The DVCC handoff sequence (temp battery registration → aggregate stop → syst
 - `SWITCH_TO_FLOAT_WAIT_FOR_SEC = 1800` — hold 28.4V absorption for 30 min after tail current before dropping to float. Default 5 min was too brief for both packs' JK BMS full-charge detection to fire and for SmartShunt 277 charged-detection to sync
 - `SWITCH_TO_BULK_SOC_THRESHOLD = 95` — rebulk at 95% SoC (default 80% left the pack drifting 80-95% without any daily absorption opportunity, missing SoC-reset events entirely)
 - JK BMS `SOC-100% Volt` set to 3.545V and `Cell OVPR` lowered correspondingly (JK requires OVPR < SOC-100%). App-side settings on each JK, not in config.ini. JK's internal SoC only resets to 100% when every cell reaches this threshold; default 3.595V was unreachable at our 3.55V daily charge target, so SoC never synced between 14-day balance cycles
+- `SMARTSHUNT_AS_BATTERY_CURRENT = True` (Zwartewater patch to dbus-aggregate-batteries) — aggregate uses SmartShunt LFP (instance 277) directly as the bank current. Required because (a) upstream `settings.py` parses `USE_SMARTSHUNTS` as bool only, silently coercing `[277]` to `False`, and (b) upstream's formula `Current = Quattro + MPPT + shunts` would double-count what flows into the LFP bank (the shunt already includes Quattro+MPPT contributions). With the patch, alternator charge via Orion DC-DC is finally visible to aggregate (previously invisible because Orion registers as `com.victronenergy.dcdc`, which the driver doesn't sum). See `patches/dbus-aggregate-batteries/README.md`
 - FLA equalisation at 31.5V every 90 days (Trojan datasheet max 32.4V, capped for safety), CCL 60A
 - FLA absorption at 29.64V when Trojan SoC < 85% (Trojan datasheet: 2.47V/cell × 12), CCL 60A
 - Voltage matching (delta <= 1V) required before reconnecting LFP bank (limits inrush current)
@@ -126,6 +127,16 @@ Tests mock D-Bus calls — no Venus OS required. Shared test helpers in `fla-sha
 ### Config
 ```bash
 sshpass -p "$CERBO_ROOT_PASSWORD" scp config/config.ini root@venus.local:/data/apps/dbus-aggregate-batteries/config.ini
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '/data/apps/dbus-aggregate-batteries/restart.sh'
+```
+
+### Aggregate driver patches (deploy after upstream updates)
+```bash
+sshpass -p "$CERBO_ROOT_PASSWORD" scp \
+  patches/dbus-aggregate-batteries/settings.py \
+  patches/dbus-aggregate-batteries/dbus-aggregate-batteries.py \
+  patches/dbus-aggregate-batteries/config.default.ini \
+  root@venus.local:/data/apps/dbus-aggregate-batteries/
 sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local '/data/apps/dbus-aggregate-batteries/restart.sh'
 ```
 
