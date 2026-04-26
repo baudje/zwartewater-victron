@@ -38,7 +38,13 @@ class TestAcquire(LockTestBase):
         info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': os.getpid()})
         with open(self.lock_file, 'w') as f:
             f.write(info)
-        self.assertFalse(lock.acquire('fla-equalisation'))
+        # Mock _pid_matches_service: on Linux the cmdline check correctly
+        # detects that os.getpid() is the unittest runner (not fla_charge.py)
+        # and would clear the lock as stale. The intent of THIS test is the
+        # other branch — "live PID AND still our service → locked", so we
+        # bypass the cmdline check.
+        with patch.object(lock, '_pid_matches_service', return_value=True):
+            self.assertFalse(lock.acquire('fla-equalisation'))
 
     def test_acquire_clears_stale_lock_from_dead_pid(self):
         info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': 99999999})
@@ -90,7 +96,11 @@ class TestIsLocked(LockTestBase):
         info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': os.getpid()})
         with open(self.lock_file, 'w') as f:
             f.write(info)
-        self.assertTrue(lock.is_locked())
+        # See test_acquire_returns_false_when_held_by_live_process: bypass
+        # the cmdline check so this test can verify the "live + matches → locked"
+        # branch on Linux without claiming os.getpid() is fla_charge.py.
+        with patch.object(lock, '_pid_matches_service', return_value=True):
+            self.assertTrue(lock.is_locked())
 
     def test_dead_pid_returns_false(self):
         info = json.dumps({'service': 'fla-charge', 'started': '2025-01-01T00:00:00', 'pid': 99999999})
