@@ -3,6 +3,7 @@
 import dbus
 import logging
 import os
+import subprocess
 import time
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,13 @@ def _get_dbus_value(bus, service, path):
         obj = bus.get_object(service, path)
         iface = dbus.Interface(obj, "com.victronenergy.BusItem")
         value = iface.GetValue()
+        # Victron publishes an empty array/dict variant to signal an invalid or
+        # not-yet-populated value (e.g. a service that is on the bus but still
+        # initialising). dbus.Array/Dictionary subclass list/dict, so check the
+        # builtins; an empty one means "no value" and must become None rather
+        # than flow through to float()/int() and raise TypeError.
+        if isinstance(value, (list, tuple, dict)) and len(value) == 0:
+            return None
         # Unwrap dbus types
         if isinstance(value, dbus.Double):
             return float(value)
@@ -230,26 +238,58 @@ class DbusMonitor:
             log.error("Failed to set BmsInstance: %s", e)
             return False
 
-    def restart_systemcalc(self):
-        """Restart dbus-systemcalc-py so it discovers newly registered battery services.
-        systemcalc doesn't detect services registered after boot — restart forces rescan."""
-        import subprocess
+    def restart_systemcalc(self, system_timeout=120, system_poll=1.0):
+        """Restart dbus-systemcalc-py so it discovers newly registered battery
+        services, then block until com.victronenergy.system re-registers.
+
+        systemcalc doesn't detect services registered after boot — restart
+        forces a rescan. But systemcalc also owns com.victronenergy.system,
+        which in turn owns the GX relays the caller opens immediately
+        afterwards. After a restart that name can take tens of seconds to
+        reappear (longer when another service is blocking systemcalc's dbus
+        scan), so a blind sleep raced ahead and relay operations failed with
+        ServiceUnknown. Returns False if the name does not return in time."""
         try:
             down = subprocess.run(["svc", "-d", "/service/dbus-systemcalc-py"], capture_output=True)
             if down.returncode != 0:
                 log.error("Failed to stop systemcalc: %s", down.stderr.decode())
                 return False
-            import time as _time
-            _time.sleep(2)
+            time.sleep(2)
             up = subprocess.run(["svc", "-u", "/service/dbus-systemcalc-py"], capture_output=True)
             if up.returncode != 0:
                 log.error("Failed to start systemcalc: %s", up.stderr.decode())
                 return False
-            _time.sleep(5)
-            log.info("systemcalc restarted for service discovery")
+            if not self.wait_for_system_service(timeout_seconds=system_timeout,
+                                                poll_interval=system_poll):
+                log.error("systemcalc restarted but com.victronenergy.system did "
+                          "not re-register within %ds", system_timeout)
+                return False
+            log.info("systemcalc restarted and com.victronenergy.system re-registered")
             return True
         except Exception as e:
             log.error("Failed to restart systemcalc: %s", e)
+            return False
+
+    def wait_for_system_service(self, timeout_seconds=120, poll_interval=1.0):
+        """Wait until com.victronenergy.system re-claims its D-Bus name.
+
+        This name owns the GX relays; relay reads/writes fail with
+        ServiceUnknown until it is back. Returns True once present, False on
+        timeout."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                if self.bus.name_has_owner(SYSTEM_SERVICE):
+                    return True
+            except Exception:
+                pass  # bus hiccup during the restart window — keep polling
+            time.sleep(poll_interval)
+        # The name may have re-registered during the final sleep that crossed
+        # the deadline — check once more before giving up, so we don't abort an
+        # operation that was a fraction of a second from being ready.
+        try:
+            return bool(self.bus.name_has_owner(SYSTEM_SERVICE))
+        except Exception:
             return False
 
     def wait_for_service_instance(self, instance, prefix="com.victronenergy.battery",

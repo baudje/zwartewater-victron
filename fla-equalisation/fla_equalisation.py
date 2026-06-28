@@ -21,7 +21,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-from temp_battery import TempBatteryService
+from temp_battery import TempBatteryService, recover_orphan_temp_battery
 from dbus_monitor import DbusMonitor
 from dbus_status_service import (
     StatusService, STATE_IDLE, STATE_STOPPING_DRIVER, STATE_DISCONNECTING,
@@ -413,6 +413,10 @@ class FlaEqualisationService:
     """Persistent service that checks conditions and runs equalisation."""
 
     def __init__(self):
+        # Clear any orphaned temp battery before anything else — a half-dead
+        # fla_temp registration (e.g. dbus-daemon restarted mid-handoff) hangs
+        # systemcalc/aggregate D-Bus scans and would break this service too.
+        recover_orphan_temp_battery()
         self.settings = Settings()
         self.monitor = DbusMonitor(lfp_instance=277, trojan_instance=279)
         self.status = StatusService()
