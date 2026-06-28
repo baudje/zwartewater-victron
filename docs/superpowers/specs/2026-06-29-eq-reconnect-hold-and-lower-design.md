@@ -35,23 +35,40 @@ During the relay-open phase the main bus must be **actively held** by the temp b
 
 All behaviour lives in shared `voltage_matching.py`; the two service loops change only how they *enter* the reconnect.
 
+Module constants `HOLD_MARGIN = 0.3` (V), `POLL_INTERVAL = 2` (s), `SETTLE_TIMEOUT = 120` (s), and `MAX_NONE_CYCLES = 10` live at the top of `voltage_matching.py`, alongside the existing `RELAY_CLOSE_DELTA_MAX` in `relay_control.py`.
+
 ### 1. Hold-and-lower in `wait_for_match`
-Each poll cycle, set the temp-battery CVL to **`LFP_voltage + HOLD_MARGIN`** (HOLD_MARGIN = 0.3V), re-evaluated live from the measured LFP voltage. With ample shore power the Quattro holds the bus at that target, so the Trojan settles ~0.3V above the LFP and *stays* there instead of sweeping past. Delta becomes small and stable. Replaces the fixed `float_voltage` CVL during matching. (Float is still applied at the very end / on teardown via the existing normal path.)
+Each poll cycle, set the temp-battery CVL to **`LFP_voltage + HOLD_MARGIN`**, re-evaluated live from the measured LFP voltage. With ample shore power the Quattro holds the bus at that target, so the Trojan settles ~0.3V above the LFP and *stays* there instead of sweeping past. Delta becomes small and stable. Replaces the fixed `float_voltage` CVL during matching.
+
+**Unreadable LFP voltage.** If `get_lfp_voltage()` returns `None`, the `LFP + HOLD_MARGIN` target can't be computed. Hold the CVL at the **`float_voltage` fallback (~27V)** — never the EQ voltage — so the bus keeps heading toward a safe low value. Sustained `None` (≥ `MAX_NONE_CYCLES`, ~20s) is a fail-safe-hold trigger (§5): reconnection can't be managed safely without the LFP voltage, so hold at float and alarm rather than close.
 
 ### 2. Fast poll
 Poll interval **30s → 2s** (`POLL_INTERVAL`). With the bus held this is belt-and-suspenders, and it makes overshoot detection responsive. The convergence condition is unchanged: close when `delta ≤ RELAY_CLOSE_DELTA_MAX`.
 
-### 3. Abort routes through the controlled reconnect
-In both service high-voltage loops (`run_equalisation` equalising loop, `run_charge` charging loop), an operator Abort (`check_abort()`) **breaks out of the loop into the existing `wait_for_match` reconnect** instead of `return False` to the hard-stop path. The run is flagged as a non-completion: after a successful reconnect it returns failure and does **not** write the `last_equalisation` timestamp, but the system is left reconnected. (Hard error aborts — Orion failure, relay-closed-externally, temp-battery-unresponsive — keep their existing immediate-abort behaviour; those are genuine emergencies, not "operator wants to stop".)
+### 3. Abort routes through the controlled reconnect — only when the relay is open
+An operator Abort (`check_abort()`) in a high-voltage loop **where the relay is open (LFP isolated)** — the `run_equalisation` equalising loop and the `run_charge` relay-open charging phases — **breaks out of the loop into the `wait_for_match` reconnect** instead of `return False` to the hard-stop path. The run is flagged as a non-completion: after a successful reconnect it returns failure and does **not** write the `last_equalisation` timestamp, but the system is left reconnected.
 
-### 4. Tear down only after the relay is closed
-The temp battery is deregistered and DVCC/aggregate restored **only after** `close_relay_verified` succeeds. The teardown sequence must never run while the relay is open and the LFP isolated.
+An abort **before the relay opens** (handoff setup, or any relay-closed phase — nothing is isolated yet) is a plain safe stop on the existing path; there is nothing to reconnect. Likewise the hard *error* aborts — Orion failure, relay-closed-externally, temp-battery-unresponsive — keep their existing immediate behaviour; those are genuine emergencies, not "operator wants to stop". This phase-scoping is the **only** way the two services differ here (fla-charge has more relay-open phases than fla-equalisation); the reconnect path itself is identical shared code.
 
-### 5. Fail-safe: hold, never free-fall
-If the bus cannot settle within `RELAY_CLOSE_DELTA_MAX` (shore lost, load spike, Quattro fault) or overshoots below `LFP − RELAY_CLOSE_DELTA_MAX`, `wait_for_match` must **keep the temp battery holding a safe bus voltage and the relay open, and raise an alarm for manual intervention** — it must not return into a teardown that deregisters the temp battery and lets the bus free-fall. Concretely: keep holding/looping with the CVL pinned to `LFP_voltage + HOLD_MARGIN`, emit a periodic alarm, and only exit to teardown once either convergence is reached (then close) or the operator forces a stop. The existing 4h convergence timeout is replaced by this hold-and-alarm behaviour so the cascade is structurally impossible.
+### 4. Teardown is guarded on a confirmed-closed relay
+The teardown sequence — deregister the temp battery, restore `BatteryService`/`BmsInstance`, restore DVCC `MaxChargeVoltage`, restart the aggregate driver — runs **only after the relay is confirmed closed** (`get_relay_state() == 1`). This must include the `finally`/cleanup block, which today deregisters the temp battery and restores DVCC *unconditionally* — exactly what lets the bus free-fall while the relay is still open. Restructure the `finally` to branch on relay state:
+
+- **Relay closed** → normal teardown (deregister temp, restore DVCC, restart aggregate, release lock).
+- **Relay open** → do **not** deregister the temp battery or restore DVCC (handing back to DVCC is what suppresses charging of the isolated full LFP and free-falls the bus). Leave the temp battery registered and holding, raise a critical "reconnect incomplete — bus held, manual intervention required" alarm, and keep the operation lock held so the other service and `startup_safety_check` stay clear.
+
+In normal operation the §5 safe-hold means the worker never leaves `wait_for_match`, so the `finally` is not reached at all; this relay-state guard is the belt-and-suspenders for any unexpected exit (exception, etc.).
+
+### 5. Fail-safe: hold forever, never free-fall, no unsafe stop
+If the bus cannot settle within `RELAY_CLOSE_DELTA_MAX` — debounced over `SETTLE_TIMEOUT` (~120s) so a transient undershoot during the initial 31V→27V settle does not false-trigger — `wait_for_match` enters a **safe-hold**: it keeps looping with the CVL pinned to `LFP_voltage + HOLD_MARGIN` (or the float fallback if LFP is `None`), the relay open, a periodic alarm raised, and the operation lock still held. It **does not return** while in safe-hold, so the caller never reaches teardown and the temp battery keeps holding the bus.
+
+The **only** exits from safe-hold are:
+1. **Convergence** — the bus comes back within `RELAY_CLOSE_DELTA_MAX` (e.g. shore power restored) → close the relay → normal teardown.
+2. **Manual operator intervention at the hardware/GUI** — the operator restores charge power, or deliberately closes relay 2 from the Cerbo GUI accepting the inrush. An explicit, out-of-band action, not the web Abort.
+
+There is deliberately **no software "force stop" that tears down**, because any teardown with the relay open *is* the free-fall cascade. A repeated web Abort while reconnecting is logged and acknowledged but does **not** abort the reconnect — the system is already driving toward the only safe end-state (reconnected, or safely held). The previous 4h convergence timeout is removed in favour of this indefinite safe-hold, so the cascade is structurally impossible.
 
 ### 6. Apply identically to fla-charge
-fla-charge shares the temp-battery handoff and reconnect; the loop-break-to-reconnect and teardown-after-close changes are mirrored there (per the repo convention to apply shared-pattern changes to both services).
+fla-charge shares the temp-battery handoff and the entire reconnect path; the loop-break-to-reconnect (for its relay-open phases per §3), the relay-state-guarded teardown (§4), and the safe-hold (§5) are mirrored there, per the repo convention to apply shared-pattern changes to both services.
 
 ## Affected files
 
@@ -61,10 +78,12 @@ fla-charge shares the temp-battery handoff and reconnect; the loop-break-to-reco
 - `fla-shared/tests/test_voltage_matching.py` — new/updated tests.
 - `fla-equalisation/tests/`, `fla-charge/tests/` — abort-routing tests.
 
-## Testing
+All tests mock D-Bus and `time` (the helpers already do this); the safe-hold loop is made testable by injecting/patching the convergence check so the loop terminates deterministically (e.g. delta returns sub-threshold after N mocked cycles, or the loop exits on a patched sentinel). The indefinite loop is bounded in tests by a max-iteration guard on the mocked monitor.
 
-- `wait_for_match`: sets temp CVL to `LFP + HOLD_MARGIN` each cycle; closes the relay when delta ≤ 1V; does NOT close while delta > 1V; on sustained non-convergence holds (keeps temp CVL pinned, relay open, raises alarm) rather than tearing down; mock time/sleep for determinism.
-- Service loops: operator Abort during the high-voltage phase enters the reconnect path (not the hard-stop) and does not write `last_equalisation`; hard error aborts still take the immediate path.
+- `wait_for_match`: sets temp CVL to `LFP + HOLD_MARGIN` each cycle; closes the relay when `delta ≤ RELAY_CLOSE_DELTA_MAX`; does NOT close while delta > threshold; a brief sub-`SETTLE_TIMEOUT` undershoot does NOT trigger the fail-safe (debounce); sustained non-convergence enters safe-hold (CVL pinned, relay open, alarm raised) and does NOT return into teardown.
+- `None` LFP voltage: CVL falls back to `float_voltage` (not EQ voltage); sustained `None` triggers safe-hold + alarm.
+- Teardown guard: with the relay open, the cleanup/`finally` does NOT deregister the temp battery or restore DVCC (alarms instead); with the relay closed it tears down normally. (Test in both services.)
+- Service loops: operator Abort during a **relay-open** high-voltage phase enters the reconnect path (not the hard-stop) and does not write `last_equalisation`; abort during a **relay-closed** phase / hard error aborts still take the immediate path.
 - Full existing suite (196 tests) stays green.
 
 ## Out of scope
