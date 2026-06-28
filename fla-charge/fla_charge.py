@@ -21,7 +21,7 @@ from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
 from dbus_monitor import DbusMonitor
-from temp_battery import TempBatteryService
+from temp_battery import TempBatteryService, recover_orphan_temp_battery
 from relay_control import (
     open_relay, verify_relay_open, verify_relay_still_open,
     close_relay_verified, close_relay_delta_aware, startup_safety_check,
@@ -505,6 +505,10 @@ class FlaChargeService:
     """Persistent service that checks conditions and runs FLA charge."""
 
     def __init__(self):
+        # Clear any orphaned temp battery before anything else — a half-dead
+        # fla_temp registration (e.g. dbus-daemon restarted mid-handoff) hangs
+        # systemcalc/aggregate D-Bus scans and would break this service too.
+        recover_orphan_temp_battery()
         self.settings = Settings()
         self.monitor = DbusMonitor(lfp_instance=277, trojan_instance=279)
         self.status = StatusService()

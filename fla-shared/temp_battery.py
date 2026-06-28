@@ -10,10 +10,43 @@ import signal
 import subprocess
 import time
 
+import lock
+
 log = logging.getLogger(__name__)
 
 CVL_FILE = "/tmp/fla_temp_cvl"
-PROCESS_SCRIPT = os.path.join(os.path.dirname(__file__), "temp_battery_process.py")
+PROCESS_NAME = "temp_battery_process.py"
+PROCESS_SCRIPT = os.path.join(os.path.dirname(__file__), PROCESS_NAME)
+
+
+def recover_orphan_temp_battery():
+    """Kill a stray temp battery subprocess left running with no operation lock.
+
+    The temp battery subprocess registers com.victronenergy.battery.fla_temp.
+    If it outlives its operation — e.g. dbus-daemon is restarted mid-handoff by
+    a firmware update — it keeps that name registered in a half-dead state,
+    which hangs every Victron dbusmonitor scan (systemcalc, the aggregate
+    driver) and takes the whole DVCC chain down. The operation lock guarantees
+    only one operation runs at a time, so a temp_battery_process.py running with
+    no lock held is definitively an orphan. Call at service startup. Returns
+    True if an orphan was found and killed."""
+    if lock.is_locked():
+        return False  # A real operation owns the temp battery — leave it alone
+    try:
+        found = subprocess.run(["pgrep", "-f", PROCESS_NAME], capture_output=True)
+    except OSError as e:
+        log.warning("Orphan temp-battery check failed (pgrep): %s", e)
+        return False
+    if found.returncode != 0 or not found.stdout.strip():
+        return False  # Nothing running — nothing to recover
+    log.warning("Orphaned temp battery subprocess running with no operation lock "
+                "— killing to unblock D-Bus discovery")
+    try:
+        subprocess.run(["pkill", "-9", "-f", PROCESS_NAME], capture_output=True)
+    except OSError as e:
+        log.error("Failed to kill orphan temp battery: %s", e)
+        return False
+    return True
 
 
 class TempBatteryService:
