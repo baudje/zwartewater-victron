@@ -214,6 +214,15 @@ class TestStartupSafetyCheck(unittest.TestCase):
         relay_control.startup_safety_check(monitor)
         self.assertEqual(monitor._relay_set_calls, [])
 
+    def test_skips_when_operation_lock_held(self, mock_time):
+        # The OTHER FLA service is mid-operation, holding the lock with the
+        # relay legitimately open — startup recovery must NOT close it.
+        monitor = MockMonitor(relay_state=0, trojan_voltage=29.5, lfp_voltage=27.0)
+        with patch('relay_control.lock') as mock_lock:
+            mock_lock.is_locked.return_value = True
+            relay_control.startup_safety_check(monitor)
+        self.assertEqual(monitor._relay_set_calls, [])
+
     def test_open_safe_delta_closes(self, mock_time):
         monitor = MockMonitor(relay_state=0, trojan_voltage=27.5, lfp_voltage=27.2)
         relay_control.startup_safety_check(monitor)
