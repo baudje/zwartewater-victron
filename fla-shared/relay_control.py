@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 
 RELAY_CLOSE_DELTA_MAX = 1.0  # Max voltage delta for auto-close (V)
 LFP_SAFE_CVL = 28.4          # Max CVL safe for LFPs (3.55V × 8 cells)
+RELAY_OPEN_MIN_DIVERGENCE = 0.15  # Min LFP<->Trojan divergence (V) proving isolation
 
 
 def open_relay(monitor):
@@ -22,17 +23,48 @@ def open_relay(monitor):
     return True
 
 
-def verify_relay_open(monitor, wait_seconds=10):
-    """Verify LFP is disconnected after relay open. Returns True if verified."""
-    time.sleep(wait_seconds)
-    lfp_current = monitor.get_lfp_current()
-    if lfp_current is None:
-        log.error("Cannot read LFP current — cannot verify relay disconnection")
+def verify_relay_open(monitor, settle_seconds=10, poll_attempts=10,
+                      poll_interval=2.0, min_divergence=RELAY_OPEN_MIN_DIVERGENCE):
+    """Verify the LFP bank is isolated from the main bus after opening relay 2.
+
+    The old check used LFP current (< 5A) as the disconnection proxy, which is
+    invalid in this topology: opening relay 2 activates the Orion DC-DC, which
+    CC-charges the LFP at its configured current (~15A on SmartShunt 277), so
+    LFP current stays high even when the relay opened correctly. Require two
+    signals the Orion can't spoof:
+
+      1. the GX relay reads open (/Relay/1/State == 0), and
+      2. the LFP voltage has diverged from the Trojan/main-bus voltage — once
+         isolated the Orion holds the LFP at a different voltage than the main
+         bus, whereas a welded relay forces the two to track each other. This
+         is the physical isolation proof the current check was meant to give.
+
+    The divergence threshold is derived from observed values (~0.03V while the
+    banks are connected vs ~0.36V once isolated). Returns True only if both
+    signals hold within the poll window.
+    """
+    time.sleep(settle_seconds)
+
+    relay_state = monitor.get_relay_state()
+    if relay_state != 0:
+        log.error("Relay 2 read-back is %s, not open — cannot verify disconnection", relay_state)
         return False
-    if abs(lfp_current) > 5.0:
-        log.error("LFP current still %.1fA after relay open — relay may not have opened", abs(lfp_current))
-        return False
-    return True
+
+    # Wait for the Orion to pull the isolated LFP bank away from the main-bus
+    # voltage; a welded relay would keep the two locked together.
+    for _ in range(poll_attempts):
+        v_lfp = monitor.get_lfp_voltage()
+        v_trojan = monitor.get_trojan_voltage()
+        if v_lfp is not None and v_trojan is not None:
+            divergence = abs(v_lfp - v_trojan)
+            if divergence >= min_divergence:
+                log.info("Relay open verified: state=0, LFP/Trojan divergence %.2fV", divergence)
+                return True
+        time.sleep(poll_interval)
+
+    log.error("LFP/Trojan voltage did not diverge >= %.2fV after relay open — "
+              "banks may still be connected (welded relay?); aborting", min_divergence)
+    return False
 
 
 def close_relay_verified(monitor):
