@@ -28,6 +28,13 @@ def _get_dbus_value(bus, service, path):
         obj = bus.get_object(service, path)
         iface = dbus.Interface(obj, "com.victronenergy.BusItem")
         value = iface.GetValue()
+        # Victron publishes an empty array/dict variant to signal an invalid or
+        # not-yet-populated value (e.g. a service that is on the bus but still
+        # initialising). dbus.Array/Dictionary subclass list/dict, so check the
+        # builtins; an empty one means "no value" and must become None rather
+        # than flow through to float()/int() and raise TypeError.
+        if isinstance(value, (list, tuple, dict)) and len(value) == 0:
+            return None
         # Unwrap dbus types
         if isinstance(value, dbus.Double):
             return float(value)
