@@ -7,6 +7,8 @@ All operations verify hardware state via read-back.
 import logging
 import time
 
+import lock
+
 log = logging.getLogger(__name__)
 
 RELAY_CLOSE_DELTA_MAX = 1.0  # Max voltage delta for auto-close (V)
@@ -162,6 +164,14 @@ def verify_relay_still_open(monitor, current_cvl):
 
 def startup_safety_check(monitor, status=None, alerting_mod=None):
     """Check relay state on service startup. Recovers from interrupted operations."""
+    # If the operation lock is held, the OTHER FLA service is mid-operation and
+    # owns the relay (legitimately open during a charge/equalisation handoff).
+    # Closing it here would stomp on a live run — leave it alone. Only a stale
+    # lock (crashed holder) frees this path to recover an interrupted operation.
+    if lock.is_locked():
+        log.info("STARTUP: operation lock held by another service — skipping relay recovery")
+        return
+
     relay_state = monitor.get_relay_state()
     if relay_state != 0:
         return  # Relay closed, nothing to recover
