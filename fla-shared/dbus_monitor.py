@@ -238,17 +238,20 @@ class DbusMonitor:
             log.error("Failed to set BmsInstance: %s", e)
             return False
 
-    def restart_systemcalc(self, system_timeout=120, system_poll=1.0):
+    def restart_systemcalc(self, system_timeout=300, system_poll=1.0):
         """Restart dbus-systemcalc-py so it discovers newly registered battery
         services, then block until com.victronenergy.system re-registers.
 
         systemcalc doesn't detect services registered after boot — restart
         forces a rescan. But systemcalc also owns com.victronenergy.system,
         which in turn owns the GX relays the caller opens immediately
-        afterwards. After a restart that name can take tens of seconds to
-        reappear (longer when another service is blocking systemcalc's dbus
-        scan), so a blind sleep raced ahead and relay operations failed with
-        ServiceUnknown. Returns False if the name does not return in time."""
+        afterwards. After a restart that name can take a long time to reappear
+        — measured at ~160s on Venus OS v3.80~33, where systemcalc's startup
+        dbus scan is slow (the temp battery service is registered at this point
+        and systemcalc introspects it). A blind sleep raced ahead and relay
+        operations failed with ServiceUnknown; the temp battery holds a safe
+        CVL throughout the wait, so a generous timeout is cheap. Returns False
+        if the name does not return in time."""
         try:
             down = subprocess.run(["svc", "-d", "/service/dbus-systemcalc-py"], capture_output=True)
             if down.returncode != 0:
@@ -270,7 +273,7 @@ class DbusMonitor:
             log.error("Failed to restart systemcalc: %s", e)
             return False
 
-    def wait_for_system_service(self, timeout_seconds=120, poll_interval=1.0):
+    def wait_for_system_service(self, timeout_seconds=300, poll_interval=1.0):
         """Wait until com.victronenergy.system re-claims its D-Bus name.
 
         This name owns the GX relays; relay reads/writes fail with

@@ -30,27 +30,40 @@ class TestOpenRelay(unittest.TestCase):
 
 @patch('relay_control.time')
 class TestVerifyRelayOpen(unittest.TestCase):
+    """Disconnection is confirmed by relay-state read-back + LFP/Trojan voltage
+    divergence, NOT LFP current. When relay 2 opens the Orion DC-DC activates
+    and CC-charges the LFP at ~15A on the SmartShunt, so LFP current is not a
+    valid disconnection signal in this topology."""
 
-    def test_low_current_verifies(self, mock_time):
-        monitor = MockMonitor(lfp_current=2.0)
-        result = relay_control.verify_relay_open(monitor)
-        self.assertTrue(result)
+    def test_open_with_voltage_divergence_verifies(self, mock_time):
+        monitor = MockMonitor(relay_state=0, lfp_voltage=27.1, trojan_voltage=26.7)
+        self.assertTrue(relay_control.verify_relay_open(monitor))
 
-    def test_high_current_fails(self, mock_time):
-        monitor = MockMonitor(lfp_current=20.0)
-        result = relay_control.verify_relay_open(monitor)
-        self.assertFalse(result)
+    def test_orion_charge_current_does_not_fail(self, mock_time):
+        # Regression: a high LFP current (the Orion charging) must NOT fail the
+        # check as long as the banks have diverged (proving isolation).
+        monitor = MockMonitor(relay_state=0, lfp_current=15.6,
+                              lfp_voltage=27.1, trojan_voltage=26.7)
+        self.assertTrue(relay_control.verify_relay_open(monitor))
 
-    def test_none_current_fails(self, mock_time):
-        """Unreadable LFP current should fail — can't verify disconnection."""
-        monitor = MockMonitor(lfp_current=None)
-        result = relay_control.verify_relay_open(monitor)
-        self.assertFalse(result)
+    def test_relay_state_not_open_fails(self, mock_time):
+        # GX reports the relay still closed — abort regardless of voltages.
+        monitor = MockMonitor(relay_state=1, lfp_voltage=27.1, trojan_voltage=26.7)
+        self.assertFalse(relay_control.verify_relay_open(monitor))
 
-    def test_sleep_called(self, mock_time):
-        monitor = MockMonitor(lfp_current=0.0)
-        relay_control.verify_relay_open(monitor, wait_seconds=15)
-        mock_time.sleep.assert_called_with(15)
+    def test_no_divergence_fails(self, mock_time):
+        # Banks track each other (~0.03V) => still connected (e.g. welded relay).
+        monitor = MockMonitor(relay_state=0, lfp_voltage=27.00, trojan_voltage=26.97)
+        self.assertFalse(relay_control.verify_relay_open(monitor))
+
+    def test_unreadable_voltage_fails(self, mock_time):
+        monitor = MockMonitor(relay_state=0, lfp_voltage=None, trojan_voltage=26.7)
+        self.assertFalse(relay_control.verify_relay_open(monitor))
+
+    def test_settle_sleep_called(self, mock_time):
+        monitor = MockMonitor(relay_state=0, lfp_voltage=27.1, trojan_voltage=26.7)
+        relay_control.verify_relay_open(monitor, settle_seconds=15)
+        mock_time.sleep.assert_any_call(15)
 
 
 @patch('relay_control.time')
