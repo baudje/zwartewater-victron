@@ -74,6 +74,15 @@ class TestRestartSystemcalcWaitsForSystem(unittest.TestCase):
 
         self.assertFalse(m.restart_systemcalc(system_timeout=1, system_poll=0.1))
 
+    def test_wait_rechecks_after_final_sleep(self, mock_time, mock_subproc):
+        # Name re-registers during the last sleep that crosses the deadline:
+        # the post-loop re-check must still report success rather than abort.
+        mock_time.time.side_effect = [0, 0, 5]   # loop body runs once, then expires
+        mock_time.sleep = MagicMock()
+        m = self._monitor(MagicMock(side_effect=[False, True]))  # True on final check
+
+        self.assertTrue(m.wait_for_system_service(timeout_seconds=1, poll_interval=0.1))
+
     def test_returns_false_if_svc_up_fails(self, mock_time, mock_subproc):
         # svc -d ok, svc -u fails -> never reach the wait
         mock_subproc.run.side_effect = [MagicMock(returncode=0),

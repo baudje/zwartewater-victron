@@ -284,7 +284,13 @@ class DbusMonitor:
             except Exception:
                 pass  # bus hiccup during the restart window — keep polling
             time.sleep(poll_interval)
-        return False
+        # The name may have re-registered during the final sleep that crossed
+        # the deadline — check once more before giving up, so we don't abort an
+        # operation that was a fraction of a second from being ready.
+        try:
+            return bool(self.bus.name_has_owner(SYSTEM_SERVICE))
+        except Exception:
+            return False
 
     def wait_for_service_instance(self, instance, prefix="com.victronenergy.battery",
                                   timeout_seconds=10, poll_interval=0.5):

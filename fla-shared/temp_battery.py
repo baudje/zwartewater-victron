@@ -17,6 +17,11 @@ log = logging.getLogger(__name__)
 CVL_FILE = "/tmp/fla_temp_cvl"
 PROCESS_NAME = "temp_battery_process.py"
 PROCESS_SCRIPT = os.path.join(os.path.dirname(__file__), PROCESS_NAME)
+# Match the launched interpreter running our script by absolute path. A bare
+# filename with pgrep/pkill -f would also hit any unrelated process that merely
+# mentions it (an editor, a manual run, a tail/grep on the path) — and we SIGKILL
+# what matches, so the matcher must be specific to the process we spawn.
+PROCESS_MATCH = "python3 " + PROCESS_SCRIPT
 
 
 def recover_orphan_temp_battery():
@@ -33,7 +38,7 @@ def recover_orphan_temp_battery():
     if lock.is_locked():
         return False  # A real operation owns the temp battery — leave it alone
     try:
-        found = subprocess.run(["pgrep", "-f", PROCESS_NAME], capture_output=True)
+        found = subprocess.run(["pgrep", "-f", PROCESS_MATCH], capture_output=True)
     except OSError as e:
         log.warning("Orphan temp-battery check failed (pgrep): %s", e)
         return False
@@ -42,7 +47,7 @@ def recover_orphan_temp_battery():
     log.warning("Orphaned temp battery subprocess running with no operation lock "
                 "— killing to unblock D-Bus discovery")
     try:
-        subprocess.run(["pkill", "-9", "-f", PROCESS_NAME], capture_output=True)
+        subprocess.run(["pkill", "-9", "-f", PROCESS_MATCH], capture_output=True)
     except OSError as e:
         log.error("Failed to kill orphan temp battery: %s", e)
         return False

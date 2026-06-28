@@ -49,7 +49,11 @@ class TestRecoverOrphanTempBattery(unittest.TestCase):
         self.assertTrue(temp_battery.recover_orphan_temp_battery())
         kill_cmd = mock_subproc.run.call_args_list[1].args[0]
         self.assertIn("pkill", kill_cmd)
-        self.assertIn("temp_battery_process.py", kill_cmd)
+        # The matcher must be specific to our spawned interpreter+script, not the
+        # bare filename, so an editor/tail/grep on the path is never SIGKILLed.
+        matcher = kill_cmd[-1]
+        self.assertTrue(matcher.startswith("python3 "))
+        self.assertIn("temp_battery_process.py", matcher)
 
 
 if __name__ == '__main__':
