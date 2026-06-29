@@ -189,18 +189,24 @@ class Takeover:
         if originals is not None:
             try:
                 self.monitor.set_bms_instance(originals["bms_instance"])
+                log.info("BmsInstance restored to %s", originals["bms_instance"])
+            except Exception:
+                log.error("CRITICAL: Failed to restore BmsInstance")
+            try:
                 self.monitor.set_battery_service_setting(originals["battery_service"])
+                log.info("BatteryService restored to %s", originals["battery_service"])
+            except Exception:
+                log.error("CRITICAL: Failed to restore BatteryService")
+            try:
                 # Restore the ceiling here too (not only in hand_back): covers the
                 # edge where the relay closed without a hand_back — e.g. an external
                 # relay close detected mid-loop at high CVL — so the ceiling never
                 # gets stranded raised. On the normal path hand_back already lowered
                 # it to the same value, so this is a harmless idempotent re-write.
                 self.monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
-                log.info("Restored DVCC originals: %s / %s / %s",
-                         originals["battery_service"], originals["bms_instance"],
-                         originals["max_charge_voltage"])
+                log.info("DVCC MaxChargeVoltage restored to %s", originals["max_charge_voltage"])
             except Exception:
-                log.error("CRITICAL: Failed to restore one or more DVCC originals")
+                log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
         else:
             log.error("CRITICAL: no DVCC originals snapshot to restore from")
 
@@ -209,6 +215,7 @@ class Takeover:
                 self.temp_service.deregister()
             except Exception:
                 pass
+            self.temp_service = None
 
         if self._aggregate_stopped:
             try:

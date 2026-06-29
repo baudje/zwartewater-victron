@@ -160,13 +160,14 @@ class TestTeardown(unittest.TestCase):
         monitor.set_dvcc_max_charge_voltage = MagicMock(side_effect=lambda v: recorded.update(cvl=v) or True)
         t = self._make(monitor)
         takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+        svc = t.temp_service
 
         t.teardown()
 
         self.assertEqual(recorded["bs"], "com.victronenergy.battery/277")  # NOT aggregate
         self.assertEqual(recorded["bms"], -1)
         self.assertEqual(recorded["cvl"], 32.0)  # NOT 28.4
-        t.temp_service.deregister.assert_called_once()
+        svc.deregister.assert_called_once()
         magg.start.assert_called_once()
         mrelease.assert_called_once()
         self.assertIsNone(takeover.load_originals())  # snapshot deleted
@@ -185,6 +186,7 @@ class TestTeardown(unittest.TestCase):
         magg.start.assert_not_called()
         self.assertTrue(self.alerting.raise_alarm.called)
         self.assertIsNotNone(takeover.load_originals())  # snapshot KEPT for resume
+        self.assertFalse(t._torn_down)
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.release_lock')
@@ -210,6 +212,36 @@ class TestTeardown(unittest.TestCase):
         takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
         t.teardown()
         self.alerting.clear_alarm.assert_not_called()
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_relay_open_then_closed_restores_on_second_call(self, mrelease, magg):
+        # First call: relay open → hold (no restore, _torn_down stays False).
+        # Second call: relay now closed → restores from snapshot and releases.
+        monitor = MockMonitor(relay_state=0)
+        t = self._make(monitor)
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+
+        t.teardown()
+
+        self.assertFalse(t._torn_down)
+        mrelease.assert_not_called()
+        self.assertTrue(self.alerting.raise_alarm.called)
+
+        # Flip relay to closed and retry.
+        monitor._relay_state = 1
+        recorded = {}
+        monitor.set_battery_service_setting = MagicMock(side_effect=lambda v: recorded.update(bs=v) or True)
+        monitor.set_bms_instance = MagicMock(side_effect=lambda v: recorded.update(bms=v) or True)
+        monitor.set_dvcc_max_charge_voltage = MagicMock(side_effect=lambda v: recorded.update(cvl=v) or True)
+
+        t.teardown()
+
+        self.assertEqual(recorded["bs"], "com.victronenergy.battery/277")
+        self.assertEqual(recorded["bms"], -1)
+        self.assertEqual(recorded["cvl"], 32.0)
+        mrelease.assert_called_once()
+        self.assertTrue(t._torn_down)
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.release_lock')
