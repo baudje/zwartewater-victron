@@ -616,5 +616,158 @@ class TestIsAcAvailableLogsExceptions(unittest.TestCase):
         self.assertIn("is_ac_available", msg)
 
 
+class TestChargeOperatorAbortRouting(unittest.TestCase):
+    """Operator Abort in the relay-open absorption loop reconnects cleanly."""
+
+    @patch('fla_charge.write_last_charge')
+    @patch('fla_charge.wait_for_match', return_value=(True, 0.2))
+    @patch('fla_charge.close_relay_verified', return_value=True)
+    @patch('fla_charge.start_aggregate', return_value=True)
+    @patch('fla_charge.stop_aggregate', return_value=True)
+    @patch('fla_charge.verify_relay_still_open', return_value=True)
+    @patch('fla_charge.verify_relay_open', return_value=True)
+    @patch('fla_charge.open_relay', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.release_lock')
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.time')
+    def test_operator_abort_in_absorption_reconnects_without_timestamp(
+        self, mock_time, mock_lock, mock_unlock, mock_ac, mock_cell, mock_open,
+        mock_verify, mock_still, mock_stop, mock_start, mock_close, mock_match, mock_write,
+    ):
+        mock_time.time.side_effect = [i for i in range(0, 400, 5)]
+        mock_time.sleep = MagicMock()
+        settings = MockChargeSettings()
+        # Phase 1 transitions immediately (LFP SoC high), relay then opens.
+        monitor = MockMonitor(relay_state=0, lfp_soc=96.0,
+                              trojan_voltage=27.2, lfp_voltage=27.0)
+        status = MockStatus()
+        # close_relay_verified must flip the monitor relay state so the finally
+        # block sees the relay closed and takes the teardown branch (not the
+        # hold/alarm branch).  Without this, release_lock is never called and
+        # the test exercises the wrong finally path.
+        def _close_and_flip(mon):
+            mon._relay_state = 1
+            return True
+        mock_close.side_effect = _close_and_flip
+        # Abort only AFTER Phase 1 (which has its own check_abort): first call
+        # in Phase 1 returns False, subsequent (absorption) returns True.
+        with patch('fla_charge.check_abort', side_effect=[False] + [True] * 50):
+            with patch('fla_charge.TempBatteryService', return_value=MagicMock()):
+                with patch('fla_charge.update_cache'):
+                    result = run_charge(settings, monitor, status)
+
+        mock_match.assert_called_once()
+        mock_close.assert_called_once()
+        mock_write.assert_not_called()
+        mock_unlock.assert_called_once()
+        self.assertFalse(result)
+
+
+class TestChargeRelayStateGuardedFinally(unittest.TestCase):
+    """The charge finally must not tear down while the relay is open."""
+
+    @patch('fla_charge.wait_for_match', return_value=(False, 0))
+    @patch('fla_charge.alerting')
+    @patch('fla_charge.start_aggregate', return_value=True)
+    @patch('fla_charge.stop_aggregate', return_value=True)
+    @patch('fla_charge.verify_relay_open', return_value=True)
+    @patch('fla_charge.open_relay', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.release_lock')
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.time')
+    def test_relay_open_exit_holds_and_does_not_teardown(
+        self, mock_time, mock_lock, mock_unlock, mock_ac, mock_cell, mock_open,
+        mock_verify, mock_stop, mock_start, mock_alerting, mock_match,
+    ):
+        mock_time.time.side_effect = [i for i in range(0, 400, 5)]
+        mock_time.sleep = MagicMock()
+        settings = MockChargeSettings()
+        # Use a valid trojan voltage so the absorption loop does not abort early
+        # via the v_trojan-is-None guard.  Setting trojan *current* to None for
+        # 10 consecutive iterations drives the code down the
+        # "Trojan current unreadable" break, which then calls wait_for_match.
+        # wait_for_match is patched to return (False, 0), making it the explicit
+        # exit driver.  The relay stays open (0) throughout, so the finally
+        # must take the hold/alarm branch, not the teardown branch.
+        monitor = MockMonitor(relay_state=0, lfp_soc=96.0,
+                              trojan_voltage=27.5, lfp_voltage=27.0)
+        monitor.get_trojan_current = MagicMock(return_value=None)
+        status = MockStatus()
+        temp = MagicMock()
+        with patch('fla_charge.TempBatteryService', return_value=temp):
+            with patch('fla_charge.update_cache'):
+                result = run_charge(settings, monitor, status)
+
+        self.assertFalse(result)
+        temp.deregister.assert_not_called()
+        mock_unlock.assert_not_called()
+        mock_start.assert_not_called()
+
+
+class TestChargeResumeOnStartup(unittest.TestCase):
+    """Startup adopts an interrupted hold instead of killing it."""
+
+    def _service(self, monitor):
+        """Build a FlaChargeService with construction side-effects stubbed.
+
+        Uses start()/addCleanup(stop) rather than a with-block so patches remain
+        active when Service() is called from the test method body (returning from
+        inside a with-block exits the context managers, removing the patches).
+        """
+        from fla_charge import FlaChargeService
+
+        p_recover = patch('fla_charge.recover_orphan_temp_battery')
+        p_settings = patch('fla_charge.Settings', return_value=MockChargeSettings())
+        p_monitor = patch('fla_charge.DbusMonitor', return_value=monitor)
+        p_status = patch('fla_charge.StatusService', return_value=MockStatus())
+        p_update = patch.object(FlaChargeService, '_update_idle_status')
+
+        mock_recover = p_recover.start()
+        p_settings.start()
+        p_monitor.start()
+        p_status.start()
+        p_update.start()
+
+        self.addCleanup(p_recover.stop)
+        self.addCleanup(p_settings.stop)
+        self.addCleanup(p_monitor.stop)
+        self.addCleanup(p_status.stop)
+        self.addCleanup(p_update.stop)
+
+        return FlaChargeService, mock_recover
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=True)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_relay_open_with_subprocess_resumes(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        mock_recover.assert_called_once_with(0)
+        mock_threading.Thread.assert_called_once()
+        mock_safety.assert_not_called()
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=False)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_relay_closed_runs_normal_safety_check(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=1)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        mock_recover.assert_called_once_with(1)
+        mock_threading.Thread.assert_not_called()
+        mock_safety.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()

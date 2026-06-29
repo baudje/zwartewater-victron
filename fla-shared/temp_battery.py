@@ -24,8 +24,25 @@ PROCESS_SCRIPT = os.path.join(os.path.dirname(__file__), PROCESS_NAME)
 PROCESS_MATCH = "python3 " + PROCESS_SCRIPT
 
 
-def recover_orphan_temp_battery():
+def is_temp_battery_running():
+    """True if a temp_battery_process.py subprocess is currently alive."""
+    try:
+        found = subprocess.run(["pgrep", "-f", PROCESS_MATCH], capture_output=True)
+    except OSError as e:
+        log.warning("temp-battery liveness check failed (pgrep): %s", e)
+        return False
+    return found.returncode == 0 and bool(found.stdout.strip())
+
+
+def recover_orphan_temp_battery(relay_state=None):
     """Kill a stray temp battery subprocess left running with no operation lock.
+
+    Relay-aware. When relay 2 is OPEN (relay_state == 0) the temp battery is
+    holding the isolated main bus — killing it is the free-fall cascade, so we
+    NEVER kill in that case; the resume path adopts it instead. We only treat a
+    stray temp battery as a true orphan when relay 2 is confirmed closed — an
+    unreadable relay state (None) is likewise left alone, since we cannot rule
+    out a live hold.
 
     The temp battery subprocess registers com.victronenergy.battery.fla_temp.
     If it outlives its operation — e.g. dbus-daemon is restarted mid-handoff by
@@ -33,8 +50,18 @@ def recover_orphan_temp_battery():
     which hangs every Victron dbusmonitor scan (systemcalc, the aggregate
     driver) and takes the whole DVCC chain down. The operation lock guarantees
     only one operation runs at a time, so a temp_battery_process.py running with
-    no lock held is definitively an orphan. Call at service startup. Returns
-    True if an orphan was found and killed."""
+    no lock held (and the relay closed) is definitively an orphan. Call at
+    service startup. Returns True if an orphan was found and killed."""
+    if relay_state != 1:
+        # Only reclaim a stray temp battery when relay 2 is CONFIRMED closed.
+        # Relay open (0) → it is a live hold; killing it free-falls the bus.
+        # Relay unknown (None — e.g. D-Bus not yet readable at startup) → we
+        # cannot rule out a live hold, so we likewise refuse to kill. A genuine
+        # half-dead orphan always has the relay closed, so it is still cleared on
+        # any startup where the relay reads cleanly.
+        log.info("Relay not confirmed closed (state=%s) at startup — not reclaiming "
+                 "temp battery; deferring to the resume path", relay_state)
+        return False
     if lock.is_locked():
         return False  # A real operation owns the temp battery — leave it alone
     try:
@@ -62,6 +89,7 @@ class TempBatteryService:
         self._device_instance = device_instance
         self._trojan_instance = trojan_instance
         self._registered = False
+        self._attached = False  # True when adopting an already-running subprocess
 
     def register(self, charge_voltage, charge_current, discharge_current=0):
         """Launch the temp battery service subprocess.
@@ -98,6 +126,19 @@ class TempBatteryService:
             self._registered = False
             return False
 
+    def attach(self):
+        """Adopt an already-running temp battery subprocess (resume path).
+
+        Used when a service starts up and finds the relay open with a temp
+        battery still holding the bus. There is no Popen handle to manage — CVL
+        is steered through the shared file and the subprocess is stopped via
+        pkill at teardown (no respawn, so the hold never gaps)."""
+        self._registered = True
+        self._attached = True
+        self._process = None
+        log.info("Attached to existing temp battery subprocess (resume)")
+        return True
+
     def update_voltage_current(self, voltage, current):
         """Voltage/current updated automatically by the subprocess from SmartShunt."""
         pass  # Subprocess reads SmartShunt directly
@@ -114,7 +155,22 @@ class TempBatteryService:
             log.warning("Failed to write CVL file: %s", e)
 
     def deregister(self):
-        """Stop the subprocess."""
+        """Stop the subprocess (Popen-managed) or kill it by match (attached)."""
+        if self._attached:
+            try:
+                subprocess.run(["pkill", "-TERM", "-f", PROCESS_MATCH],
+                               capture_output=True)
+                log.info("Attached temp battery subprocess signalled to stop")
+            except OSError as e:
+                log.warning("Failed to stop attached temp battery: %s", e)
+            try:
+                os.unlink(CVL_FILE)
+            except OSError:
+                pass
+            self._registered = False
+            self._attached = False
+            return
+
         if not self._registered or self._process is None:
             return
         try:

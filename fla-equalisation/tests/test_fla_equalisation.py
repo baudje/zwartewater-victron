@@ -289,6 +289,98 @@ class TestSafetyGuards(unittest.TestCase):
         mock_open.assert_not_called()
 
 
+class TestOperatorAbortRouting(unittest.TestCase):
+    """Operator Abort in the relay-open equalising loop reconnects cleanly."""
+
+    def _make_mocks(self, **kw):
+        settings = MockSettings(**kw)
+        monitor = MockMonitor(trojan_voltage=27.2, lfp_voltage=27.0, relay_state=0)
+        status = MockStatus()
+        return settings, monitor, status
+
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.2))
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.check_abort', return_value=True)
+    @patch('fla_equalisation.time')
+    def test_operator_abort_reconnects_without_timestamp(
+        self, mock_time, mock_abort, mock_lock, mock_unlock, mock_open, mock_verify,
+        mock_stop, mock_start, mock_close, mock_match, mock_write,
+    ):
+        mock_time.time.side_effect = [i for i in range(0, 200, 5)]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            with patch('fla_equalisation.update_cache'):
+                result = run_equalisation(settings, monitor, status)
+
+        # Reconnect happened…
+        mock_match.assert_called_once()
+        mock_close.assert_called_once()
+        # …but the run is flagged non-completion: no timestamp, returns False.
+        mock_write.assert_not_called()
+        self.assertFalse(result)
+
+
+class TestRelayStateGuardedFinally(unittest.TestCase):
+    """The finally must not tear down while the relay is open."""
+
+    @patch('fla_equalisation.raise_alarm')
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.time')
+    def test_relay_open_exit_holds_and_does_not_teardown(
+        self, mock_time, mock_lock, mock_unlock, mock_open, mock_verify,
+        mock_stop, mock_start, mock_alarm,
+    ):
+        # Trojan goes unresponsive mid-EQ (hard error) → return False with relay open.
+        mock_time.time.side_effect = [i for i in range(0, 200, 5)]
+        mock_time.sleep = MagicMock()
+        settings = MockSettings()
+        monitor = MockMonitor(relay_state=0, lfp_voltage=27.0)
+        monitor.get_trojan_voltage = MagicMock(return_value=None)  # unresponsive
+        status = MockStatus()
+        temp = MagicMock()
+        with patch('fla_equalisation.TempBatteryService', return_value=temp):
+            with patch('fla_equalisation.update_cache'):
+                result = run_equalisation(settings, monitor, status)
+
+        self.assertFalse(result)
+        temp.deregister.assert_not_called()      # temp battery left holding
+        mock_unlock.assert_not_called()          # lock stays held
+        self.assertTrue(mock_alarm.called)       # hold alarm raised
+
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    def test_relay_closed_exit_tears_down_normally(
+        self, mock_lock, mock_unlock, mock_stop, mock_start, mock_close,
+    ):
+        # stop_aggregate fails before relay ever opens → relay stays closed.
+        settings = MockSettings()
+        monitor = MockMonitor(relay_state=1)
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            result = run_equalisation(settings, monitor, status)
+
+        self.assertFalse(result)
+        mock_unlock.assert_called_once()         # normal teardown released the lock
+
+
 class TestFinallySafety(unittest.TestCase):
     """Test the finally block's delta-aware relay handling."""
 
@@ -832,6 +924,69 @@ class TestStatusServiceDeregisterFailsFast(unittest.TestCase):
         # No exception — registered=False short-circuits before touching None.
         svc.set_alarm(2)
         svc.clear_alarm_path()
+
+
+class TestResumeOnStartup(unittest.TestCase):
+    """Startup adopts an interrupted hold instead of killing it."""
+
+    def _service(self, monitor):
+        """Build a FlaEqualisationService with construction side-effects stubbed.
+
+        Uses start()/addCleanup(stop) rather than a with-block so patches remain
+        active when Service() is called from the test method body (returning from
+        inside a with-block exits the context managers, removing the patches).
+        """
+        from fla_equalisation import FlaEqualisationService
+
+        p_recover = patch('fla_equalisation.recover_orphan_temp_battery')
+        p_settings = patch('fla_equalisation.Settings', return_value=MockSettings())
+        p_monitor = patch('fla_equalisation.DbusMonitor', return_value=monitor)
+        p_status = patch('fla_equalisation.StatusService', return_value=MockStatus())
+        p_update = patch.object(FlaEqualisationService, '_update_idle_status')
+
+        mock_recover = p_recover.start()
+        p_settings.start()
+        p_monitor.start()
+        p_status.start()
+        p_update.start()
+
+        self.addCleanup(p_recover.stop)
+        self.addCleanup(p_settings.stop)
+        self.addCleanup(p_monitor.stop)
+        self.addCleanup(p_status.stop)
+        self.addCleanup(p_update.stop)
+
+        return FlaEqualisationService, mock_recover
+
+    @patch('fla_equalisation.threading')
+    @patch('fla_equalisation.startup_safety_check')
+    @patch('fla_equalisation.is_temp_battery_running', return_value=True)
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    def test_relay_open_with_subprocess_resumes(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        # Orphan recovery saw relay open and was a no-op; resume started a worker;
+        # the normal startup safety check was skipped.
+        mock_recover.assert_called_once_with(0)
+        mock_threading.Thread.assert_called_once()
+        mock_safety.assert_not_called()
+
+    @patch('fla_equalisation.threading')
+    @patch('fla_equalisation.startup_safety_check')
+    @patch('fla_equalisation.is_temp_battery_running', return_value=False)
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    def test_relay_closed_runs_normal_safety_check(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=1)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        mock_recover.assert_called_once_with(1)
+        mock_threading.Thread.assert_not_called()
+        mock_safety.assert_called_once()
 
 
 if __name__ == '__main__':
