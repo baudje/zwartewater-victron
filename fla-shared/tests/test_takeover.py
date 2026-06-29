@@ -331,5 +331,48 @@ class TestHandBack(unittest.TestCase):
         mrelease.assert_not_called()   # teardown must not run
 
 
+class TestResumeAttach(unittest.TestCase):
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_res.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
+
+    def _resume(self, monitor):
+        return takeover.Takeover.resume_attach(monitor, self.status, self.alerting,
+                                               "fla-equalisation", _states())
+
+    @patch('takeover.is_temp_battery_running', return_value=True)
+    @patch('takeover.TempBatteryService')
+    def test_relay_open_with_snapshot_attaches(self, MockTBS, _running):
+        MockTBS.return_value = MagicMock()
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+        monitor = MockMonitor(relay_state=0)
+        t = self._resume(monitor)
+        self.assertIsNotNone(t)
+        t.temp_service.attach.assert_called_once()
+        self.assertEqual(t._originals["battery_service"], "com.victronenergy.battery/277")
+        self.assertTrue(t._aggregate_stopped)
+
+    @patch('takeover.is_temp_battery_running', return_value=False)
+    def test_relay_open_no_temp_returns_none(self, _running):
+        monitor = MockMonitor(relay_state=0)
+        self.assertIsNone(self._resume(monitor))
+
+    @patch('takeover.is_temp_battery_running', return_value=True)
+    def test_relay_closed_returns_none(self, _running):
+        monitor = MockMonitor(relay_state=1)
+        self.assertIsNone(self._resume(monitor))
+
+    @patch('takeover.is_temp_battery_running', return_value=True)
+    @patch('takeover.TempBatteryService')
+    def test_relay_open_missing_snapshot_alarms_and_returns_none(self, MockTBS, _running):
+        monitor = MockMonitor(relay_state=0)  # no snapshot saved
+        t = self._resume(monitor)
+        self.assertIsNone(t)
+        self.assertTrue(self.alerting.raise_alarm.called)
+
+
 if __name__ == '__main__':
     unittest.main()

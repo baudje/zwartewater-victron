@@ -262,3 +262,31 @@ class Takeover:
     def abort_teardown(self):
         """Alias for service finally blocks — the guarded teardown belt-and-suspenders."""
         self.teardown()
+
+    @classmethod
+    def resume_attach(cls, monitor, status, alerting_mod, service_name, states):
+        """Adopt an interrupted takeover on startup. Returns a Takeover ready for
+        hand_back, or None when there is nothing to resume (relay closed, or no
+        temp battery). When the relay is open with a live temp battery but the
+        DVCC originals snapshot is missing, alarms and returns None — we refuse
+        to restore to guessed values (ADR-0001)."""
+        if monitor.get_relay_state() != 0:
+            return None  # relay closed — nothing isolated
+        if not is_temp_battery_running():
+            return None  # relay open but no holder — caller runs startup_safety_check
+        originals = load_originals()
+        if originals is None:
+            log.error("RESUME: relay open + temp battery but no DVCC snapshot — "
+                      "refusing to guess; holding and alarming")
+            alerting_mod.raise_alarm(
+                "Reconnect incomplete — bus held, DVCC originals lost, manual intervention required",
+                status_service=status,
+            )
+            return None
+        t = cls(monitor, status, alerting_mod, service_name, states)
+        t.temp_service = TempBatteryService(device_instance=TEMP_INSTANCE)
+        t.temp_service.attach()
+        t._originals = originals
+        t._aggregate_stopped = True  # the interrupted operation stopped it
+        log.warning("RESUME: adopted interrupted takeover (snapshot loaded)")
+        return t
