@@ -279,8 +279,8 @@ class TestHandBack(unittest.TestCase):
     @patch('takeover.voltage_matching')
     def test_converged_closes_and_tears_down(self, mvm, mrelay, mrelease, magg):
         mvm.wait_for_match.return_value = (True, 0.2)
-        mrelay.close_relay_verified.return_value = True
-        monitor = MockMonitor(relay_state=1)  # close_relay flips MockMonitor to 1 anyway
+        mrelay.close_relay_verified.side_effect = lambda m: setattr(m, '_relay_state', 1) or True
+        monitor = MockMonitor(relay_state=0)  # relay starts open; relay_control is fully mocked so the value is inert
         t = self._make(monitor)
         matched, delta = t.hand_back(float_voltage=27.0, voltage_delta_max=1.0)
         self.assertTrue(matched)
@@ -292,7 +292,9 @@ class TestHandBack(unittest.TestCase):
     @patch('takeover.relay_control')
     @patch('takeover.voltage_matching')
     def test_restores_ceiling_from_snapshot_before_matching(self, mvm, mrelay, mrelease, magg):
-        mvm.wait_for_match.return_value = (True, 0.2)
+        # side_effect asserts the ceiling is already in recorded when wait_for_match runs,
+        # proving the restore happens BEFORE matching (relay still open — safe).
+        mvm.wait_for_match.side_effect = lambda *a, **k: (self.assertIn(32.0, recorded), (True, 0.2))[1]
         mrelay.close_relay_verified.return_value = True
         monitor = MockMonitor(relay_state=1)
         recorded = []
@@ -313,6 +315,20 @@ class TestHandBack(unittest.TestCase):
         self.assertFalse(matched)
         mrelay.close_relay_verified.assert_not_called()
         mrelease.assert_not_called()
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.relay_control')
+    @patch('takeover.voltage_matching')
+    def test_close_failure_raises_alarm_and_no_teardown(self, mvm, mrelay, mrelease, magg):
+        mvm.wait_for_match.return_value = (True, 0.3)
+        mrelay.close_relay_verified.return_value = False   # close fails
+        monitor = MockMonitor(relay_state=0)
+        t = self._make(monitor)
+        matched, delta = t.hand_back(float_voltage=27.0, voltage_delta_max=1.0)
+        self.assertFalse(matched)
+        self.alerting.raise_alarm.assert_called_once()
+        mrelease.assert_not_called()   # teardown must not run
 
 
 if __name__ == '__main__':
