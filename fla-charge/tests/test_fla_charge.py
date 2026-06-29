@@ -643,6 +643,14 @@ class TestChargeOperatorAbortRouting(unittest.TestCase):
         monitor = MockMonitor(relay_state=0, lfp_soc=96.0,
                               trojan_voltage=27.2, lfp_voltage=27.0)
         status = MockStatus()
+        # close_relay_verified must flip the monitor relay state so the finally
+        # block sees the relay closed and takes the teardown branch (not the
+        # hold/alarm branch).  Without this, release_lock is never called and
+        # the test exercises the wrong finally path.
+        def _close_and_flip(mon):
+            mon._relay_state = 1
+            return True
+        mock_close.side_effect = _close_and_flip
         # Abort only AFTER Phase 1 (which has its own check_abort): first call
         # in Phase 1 returns False, subsequent (absorption) returns True.
         with patch('fla_charge.check_abort', side_effect=[False] + [True] * 50):
@@ -653,12 +661,14 @@ class TestChargeOperatorAbortRouting(unittest.TestCase):
         mock_match.assert_called_once()
         mock_close.assert_called_once()
         mock_write.assert_not_called()
+        mock_unlock.assert_called_once()
         self.assertFalse(result)
 
 
 class TestChargeRelayStateGuardedFinally(unittest.TestCase):
     """The charge finally must not tear down while the relay is open."""
 
+    @patch('fla_charge.wait_for_match', return_value=(False, 0))
     @patch('fla_charge.alerting')
     @patch('fla_charge.start_aggregate', return_value=True)
     @patch('fla_charge.stop_aggregate', return_value=True)
@@ -671,13 +681,21 @@ class TestChargeRelayStateGuardedFinally(unittest.TestCase):
     @patch('fla_charge.time')
     def test_relay_open_exit_holds_and_does_not_teardown(
         self, mock_time, mock_lock, mock_unlock, mock_ac, mock_cell, mock_open,
-        mock_verify, mock_stop, mock_start, mock_alerting,
+        mock_verify, mock_stop, mock_start, mock_alerting, mock_match,
     ):
         mock_time.time.side_effect = [i for i in range(0, 400, 5)]
         mock_time.sleep = MagicMock()
         settings = MockChargeSettings()
-        monitor = MockMonitor(relay_state=0, lfp_soc=96.0, lfp_voltage=27.0)
-        monitor.get_trojan_voltage = MagicMock(return_value=None)  # unresponsive in absorption
+        # Use a valid trojan voltage so the absorption loop does not abort early
+        # via the v_trojan-is-None guard.  Setting trojan *current* to None for
+        # 10 consecutive iterations drives the code down the
+        # "Trojan current unreadable" break, which then calls wait_for_match.
+        # wait_for_match is patched to return (False, 0), making it the explicit
+        # exit driver.  The relay stays open (0) throughout, so the finally
+        # must take the hold/alarm branch, not the teardown branch.
+        monitor = MockMonitor(relay_state=0, lfp_soc=96.0,
+                              trojan_voltage=27.5, lfp_voltage=27.0)
+        monitor.get_trojan_current = MagicMock(return_value=None)
         status = MockStatus()
         temp = MagicMock()
         with patch('fla_charge.TempBatteryService', return_value=temp):
@@ -687,6 +705,7 @@ class TestChargeRelayStateGuardedFinally(unittest.TestCase):
         self.assertFalse(result)
         temp.deregister.assert_not_called()
         mock_unlock.assert_not_called()
+        mock_start.assert_not_called()
 
 
 if __name__ == '__main__':
