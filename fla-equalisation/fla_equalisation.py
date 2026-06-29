@@ -376,44 +376,58 @@ def run_equalisation(settings, monitor, status):
         return False
 
     finally:
-        # Restore DVCC settings before anything else
-        if original_bms_instance is not None:
-            try:
-                monitor.set_bms_instance(original_bms_instance)
-                log.info("BmsInstance restored to %s", original_bms_instance)
-            except Exception:
-                log.error("CRITICAL: Failed to restore BmsInstance setting")
+        # Teardown (handing control back to DVCC/aggregate) is SAFE ONLY once
+        # the relay is confirmed closed. With the relay open the LFP is still
+        # isolated and the temp battery is holding the bus — deregistering it or
+        # restoring DVCC now is exactly the free-fall cascade. So branch on relay
+        # state. In normal operation the safe-hold means we never reach here with
+        # the relay open; this is the belt-and-suspenders for any unexpected exit.
+        if monitor.get_relay_state() != 1:
+            log.error("CLEANUP: relay open at exit — holding bus, NOT tearing down "
+                      "(temp battery left registered, lock held, aggregate stopped)")
+            raise_alarm(
+                "Reconnect incomplete — bus held by temp battery, manual intervention required",
+                status_service=status,
+            )
+        else:
+            # Relay confirmed closed — restore DVCC and hand back to the aggregate.
+            if original_bms_instance is not None:
+                try:
+                    monitor.set_bms_instance(original_bms_instance)
+                    log.info("BmsInstance restored to %s", original_bms_instance)
+                except Exception:
+                    log.error("CRITICAL: Failed to restore BmsInstance setting")
 
-        if original_battery_service is not None:
-            try:
-                monitor.set_battery_service_setting(original_battery_service)
-                log.info("BatteryService restored to %s", original_battery_service)
-            except Exception:
-                log.error("CRITICAL: Failed to restore BatteryService setting")
+            if original_battery_service is not None:
+                try:
+                    monitor.set_battery_service_setting(original_battery_service)
+                    log.info("BatteryService restored to %s", original_battery_service)
+                except Exception:
+                    log.error("CRITICAL: Failed to restore BatteryService setting")
 
-        if original_dvcc_voltage is not None:
-            try:
-                monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
-                log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
-            except Exception:
-                log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
+            if original_dvcc_voltage is not None:
+                try:
+                    monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
+                    log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
+                except Exception:
+                    log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
 
-        if temp_service is not None:
-            try:
-                temp_service.deregister()
-            except Exception:
-                pass
+            if temp_service is not None:
+                try:
+                    temp_service.deregister()
+                except Exception:
+                    pass
 
-        # CRIT-2: Check voltage delta before closing relay
-        close_relay_delta_aware(monitor, alerting, status)
+            # No-op when the relay is already closed; harmless belt-and-suspenders.
+            close_relay_delta_aware(monitor, alerting, status)
 
-        if aggregate_stopped:
-            try:
-                start_aggregate_driver()
-            except Exception:
-                log.error("CRITICAL: Failed to restart aggregate driver in cleanup")
+            if aggregate_stopped:
+                try:
+                    start_aggregate_driver()
+                except Exception:
+                    log.error("CRITICAL: Failed to restart aggregate driver in cleanup")
 
-        release_lock()
+            release_lock()
 
 
 class FlaEqualisationService:

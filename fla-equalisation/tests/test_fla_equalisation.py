@@ -329,6 +329,58 @@ class TestOperatorAbortRouting(unittest.TestCase):
         self.assertFalse(result)
 
 
+class TestRelayStateGuardedFinally(unittest.TestCase):
+    """The finally must not tear down while the relay is open."""
+
+    @patch('fla_equalisation.raise_alarm')
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.time')
+    def test_relay_open_exit_holds_and_does_not_teardown(
+        self, mock_time, mock_lock, mock_unlock, mock_open, mock_verify,
+        mock_stop, mock_start, mock_alarm,
+    ):
+        # Trojan goes unresponsive mid-EQ (hard error) → return False with relay open.
+        mock_time.time.side_effect = [i for i in range(0, 200, 5)]
+        mock_time.sleep = MagicMock()
+        settings = MockSettings()
+        monitor = MockMonitor(relay_state=0, lfp_voltage=27.0)
+        monitor.get_trojan_voltage = MagicMock(return_value=None)  # unresponsive
+        status = MockStatus()
+        temp = MagicMock()
+        with patch('fla_equalisation.TempBatteryService', return_value=temp):
+            with patch('fla_equalisation.update_cache'):
+                result = run_equalisation(settings, monitor, status)
+
+        self.assertFalse(result)
+        temp.deregister.assert_not_called()      # temp battery left holding
+        mock_unlock.assert_not_called()          # lock stays held
+        self.assertTrue(mock_alarm.called)       # hold alarm raised
+
+    @patch('fla_equalisation.close_relay_delta_aware')
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    def test_relay_closed_exit_tears_down_normally(
+        self, mock_lock, mock_unlock, mock_stop, mock_start, mock_close,
+    ):
+        # stop_aggregate fails before relay ever opens → relay stays closed.
+        settings = MockSettings()
+        monitor = MockMonitor(relay_state=1)
+        status = MockStatus()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            result = run_equalisation(settings, monitor, status)
+
+        self.assertFalse(result)
+        mock_unlock.assert_called_once()         # normal teardown released the lock
+
+
 class TestFinallySafety(unittest.TestCase):
     """Test the finally block's delta-aware relay handling."""
 
