@@ -33,7 +33,7 @@ import alerting
 from alerting import raise_alarm, clear_alarm
 from relay_control import verify_relay_still_open, startup_safety_check
 from temp_compensation import compensate as temp_compensate
-from lock import acquire as acquire_lock
+from lock import acquire as acquire_lock, release as release_lock
 from web_server import (
     start_web_server,
     update_cache,
@@ -289,9 +289,15 @@ class FlaEqualisationService:
             return True
         t = Takeover.resume_attach(self.monitor, self.status, alerting,
                                    "fla-equalisation", EQ_TAKEOVER_STATES)
-        if t is None:
+        if t is Takeover.RESUME_HELD:
             # Snapshot missing — resume_attach already alarmed; hold (keep lock).
             return True
+        if t is None:
+            # The relay closed or the temp battery vanished between our checks and
+            # resume_attach's — nothing to adopt. Release the lock we took and fall
+            # through to the normal startup safety check.
+            release_lock()
+            return False
         log.warning("RESUME: adopting interrupted takeover and finishing hand-back")
         self._running = True
 
@@ -305,6 +311,10 @@ class FlaEqualisationService:
                 # teardown no longer clears the alarm; the success path owns it.
                 if matched:
                     clear_alarm(status_service=self.status)
+                else:
+                    # Non-exception failure (safe-hold or relay close failed): the
+                    # alarm is already up; reflect the failure in the status display.
+                    self.status.update(state=STATE_ERROR)
             except Exception as e:
                 log.exception("RESUME worker error: %s", e)
                 t.abort_teardown()

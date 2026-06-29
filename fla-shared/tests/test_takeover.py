@@ -196,6 +196,22 @@ class TestTeardown(_TakeoverFixtureMixin, unittest.TestCase):
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.release_lock')
+    def test_relay_open_with_prior_alarm_does_not_raise_generic(self, mrelease, magg):
+        # A specific root cause was already raised (e.g. relay close failed).
+        # The safe-hold teardown must NOT bury it with the generic message.
+        monitor = MockMonitor(relay_state=0)
+        t = self._make(monitor)
+        t._alarm_message = "Failed to close relay 2"
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+
+        t.teardown()
+
+        self.alerting.raise_alarm.assert_not_called()  # generic message suppressed
+        mrelease.assert_not_called()                   # still a safe-hold (no teardown)
+        self.assertFalse(t._torn_down)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
     def test_relay_closed_uses_persisted_snapshot_when_originals_none(self, mrelease, magg):
         # Resume case: self._originals is None; teardown must read the snapshot.
         monitor = MockMonitor(relay_state=1)
@@ -365,6 +381,7 @@ class TestHandBack(_TakeoverFixtureMixin, unittest.TestCase):
         matched, delta = t.hand_back(float_voltage=27.0, voltage_delta_max=1.0)
         self.assertFalse(matched)
         self.alerting.raise_alarm.assert_called_once()
+        self.assertEqual(t._alarm_message, "Failed to close relay 2")  # root cause stashed
         mrelease.assert_not_called()   # teardown must not run
 
 
@@ -404,10 +421,10 @@ class TestResumeAttach(unittest.TestCase):
 
     @patch('takeover.is_temp_battery_running', return_value=True)
     @patch('takeover.TempBatteryService')
-    def test_relay_open_missing_snapshot_alarms_and_returns_none(self, MockTBS, _running):
+    def test_relay_open_missing_snapshot_alarms_and_returns_held(self, MockTBS, _running):
         monitor = MockMonitor(relay_state=0)  # no snapshot saved
         t = self._resume(monitor)
-        self.assertIsNone(t)
+        self.assertIs(t, takeover.Takeover.RESUME_HELD)  # held, NOT None
         self.assertTrue(self.alerting.raise_alarm.called)
 
 

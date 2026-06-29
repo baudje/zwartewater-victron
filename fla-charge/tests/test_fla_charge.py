@@ -580,16 +580,61 @@ class TestChargeResumeOnStartup(unittest.TestCase):
     @patch('fla_charge.startup_safety_check')
     @patch('fla_charge.is_temp_battery_running', return_value=True)
     @patch('fla_charge.acquire_lock', return_value=True)
-    def test_relay_open_missing_snapshot_holds_no_worker(
+    def test_relay_open_held_no_worker_keeps_lock(
         self, mock_acquire, mock_running, mock_safety, mock_threading,
     ):
+        # resume_attach raised an alarm and is holding the bus (RESUME_HELD):
+        # no worker, no safety check, and the lock is NOT released.
         monitor = MockMonitor(relay_state=0)
         Service, mock_recover = self._service(monitor)
-        with patch('fla_charge.Takeover') as MockT:
-            MockT.resume_attach.return_value = None
+        with patch('fla_charge.Takeover') as MockT, \
+             patch('fla_charge.release_lock') as mock_release:
+            MockT.resume_attach.return_value = MockT.RESUME_HELD
             Service()
         mock_threading.Thread.assert_not_called()
         mock_safety.assert_not_called()
+        mock_release.assert_not_called()
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=True)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_resume_nothing_to_adopt_releases_lock_and_runs_safety(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        # resume_attach returned None (relay closed / temp gone in the race): the
+        # lock we took is released and the normal startup safety check runs.
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        with patch('fla_charge.Takeover') as MockT, \
+             patch('fla_charge.release_lock') as mock_release:
+            MockT.resume_attach.return_value = None
+            Service()
+        mock_threading.Thread.assert_not_called()
+        mock_release.assert_called_once()
+        mock_safety.assert_called_once()
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=True)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_resume_worker_non_matched_sets_error(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        # A non-exception hand_back failure (safe-hold / relay close failed) must
+        # leave the status display in STATE_ERROR, not stuck in a matching state.
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        with patch('fla_charge.Takeover') as MockT, \
+             patch('fla_charge.alerting') as mock_alerting:
+            t = MagicMock()
+            t.hand_back.return_value = (False, 2.0)
+            MockT.resume_attach.return_value = t
+            svc = Service()
+            worker = mock_threading.Thread.call_args.kwargs['target']
+            worker()
+        self.assertIn(STATE_ERROR, svc.status.states)
+        mock_alerting.clear_alarm.assert_not_called()
 
     @patch('fla_charge.threading')
     @patch('fla_charge.startup_safety_check')

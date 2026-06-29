@@ -82,6 +82,12 @@ class Takeover:
     confirmed closed; otherwise the bus is held and an alarm raised.
     """
 
+    # Sentinel returned by resume_attach when the bus is held and an alarm has
+    # been raised (relay open + live temp battery but the DVCC snapshot is
+    # missing). Distinct from None ("nothing to resume"): the caller must keep
+    # the lock and NOT fall through to startup_safety_check.
+    RESUME_HELD = object()
+
     def __init__(self, monitor, status, alerting_mod, service_name, states):
         self.monitor = monitor
         self.status = status
@@ -93,10 +99,17 @@ class Takeover:
         self._originals = None
         self._torn_down = False
         self._dvcc_switched = False  # True once DVCC has been pointed at the temp battery
+        self._alarm_message = None   # the most-specific alarm this operation raised, if any
+
+    def _alarm(self, message):
+        """Raise an alarm and remember its message, so the guarded teardown's
+        generic safe-hold alarm does not bury this more-specific root cause."""
+        self.alerting.raise_alarm(message, status_service=self.status)
+        self._alarm_message = message
 
     def _fail(self, message):
         """Alarm, tear down, and signal failure."""
-        self.alerting.raise_alarm(message, status_service=self.status)
+        self._alarm(message)
         self.teardown()
         return False
 
@@ -110,8 +123,7 @@ class Takeover:
         self.temp_service = TempBatteryService(device_instance=TEMP_INSTANCE)
         if not self.temp_service.register(charge_voltage=safe_voltage,
                                           charge_current=charge_current):
-            self.alerting.raise_alarm("Failed to start temp battery service",
-                                      status_service=self.status)
+            self._alarm("Failed to start temp battery service")
             return False
 
         # 2. Stop the aggregate driver.
@@ -183,10 +195,18 @@ class Takeover:
         if self.monitor.get_relay_state() != 1:
             log.error("Takeover teardown: relay open — holding bus, NOT restoring "
                       "(temp battery, DVCC, lock all left in place)")
-            self.alerting.raise_alarm(
-                "Reconnect incomplete — bus held by temp battery, manual intervention required",
-                status_service=self.status,
-            )
+            # Raise the generic safe-hold alarm only if this operation has not
+            # already raised a more-specific one (e.g. "Failed to close relay 2").
+            # The D-Bus alarm path carries only a level, so the message lives only
+            # in the log; a second raise would bury the root cause.
+            if self._alarm_message is None:
+                self.alerting.raise_alarm(
+                    "Reconnect incomplete — bus held by temp battery, manual intervention required",
+                    status_service=self.status,
+                )
+            else:
+                log.error("Takeover teardown: bus held; manual intervention required "
+                          "(root cause already raised: %s)", self._alarm_message)
             return  # NOT torn down — a later teardown (relay since closed) may still restore
 
         # Bring the aggregate driver back up FIRST, while the temp battery is
@@ -274,7 +294,7 @@ class Takeover:
 
         self.status.update(state=self.states.reconnecting)
         if not relay_control.close_relay_verified(self.monitor):
-            self.alerting.raise_alarm("Failed to close relay 2", status_service=self.status)
+            self._alarm("Failed to close relay 2")
             return False, delta
 
         self.status.update(state=self.states.restarting_driver)
@@ -287,11 +307,16 @@ class Takeover:
 
     @classmethod
     def resume_attach(cls, monitor, status, alerting_mod, service_name, states):
-        """Adopt an interrupted takeover on startup. Returns a Takeover ready for
-        hand_back, or None when there is nothing to resume (relay closed, or no
-        temp battery). When the relay is open with a live temp battery but the
-        DVCC originals snapshot is missing, alarms and returns None — we refuse
-        to restore to guessed values (ADR-0001)."""
+        """Adopt an interrupted takeover on startup. Tristate return:
+
+        - a Takeover ready for hand_back — adopt and finish it;
+        - None — nothing to resume (relay closed, or the temp battery vanished
+          between the caller's check and ours); the caller should release the
+          lock and fall through to startup_safety_check;
+        - Takeover.RESUME_HELD — relay open + live temp battery but the DVCC
+          snapshot is missing; an alarm was raised and the bus is held. The
+          caller must keep the lock and skip startup_safety_check. We refuse to
+          restore to guessed values (ADR-0001)."""
         if monitor.get_relay_state() != 0:
             return None  # relay closed — nothing isolated
         if not is_temp_battery_running():
@@ -304,7 +329,7 @@ class Takeover:
                 "Reconnect incomplete — bus held, DVCC originals lost, manual intervention required",
                 status_service=status,
             )
-            return None
+            return cls.RESUME_HELD
         t = cls(monitor, status, alerting_mod, service_name, states)
         t.temp_service = TempBatteryService(device_instance=TEMP_INSTANCE)
         t.temp_service.attach()
