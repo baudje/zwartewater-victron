@@ -161,5 +161,67 @@ class Takeover:
         return True
 
     def teardown(self):
-        """Placeholder — replaced in Task 3 with the guarded restore."""
-        pass
+        """The single relay-state-guarded restore. Idempotent (a completed
+        teardown is a no-op on re-entry, so the service finally can always call it).
+
+        Relay confirmed closed -> restore the DVCC originals (from the in-memory
+        snapshot, or the persisted file on resume), deregister the temp battery,
+        restart the aggregate, release the lock, delete the snapshot. Relay open
+        -> hold the bus and alarm; restore NOTHING (handing DVCC back while the
+        LFP is isolated is the free-fall).
+
+        Teardown does NOT touch the alarm: a failure path raised an alarm before
+        calling teardown and the operator must keep seeing it; clearing the alarm
+        on success is the caller's job (run_*/resume on a matched hand_back)."""
+        if self._torn_down:
+            return  # a completed teardown already ran — never repeat it
+
+        if self.monitor.get_relay_state() != 1:
+            log.error("Takeover teardown: relay open — holding bus, NOT restoring "
+                      "(temp battery, DVCC, lock all left in place)")
+            self.alerting.raise_alarm(
+                "Reconnect incomplete — bus held by temp battery, manual intervention required",
+                status_service=self.status,
+            )
+            return  # NOT torn down — a later teardown (relay since closed) may still restore
+
+        originals = self._originals or load_originals()
+        if originals is not None:
+            try:
+                self.monitor.set_bms_instance(originals["bms_instance"])
+                self.monitor.set_battery_service_setting(originals["battery_service"])
+                # Restore the ceiling here too (not only in hand_back): covers the
+                # edge where the relay closed without a hand_back — e.g. an external
+                # relay close detected mid-loop at high CVL — so the ceiling never
+                # gets stranded raised. On the normal path hand_back already lowered
+                # it to the same value, so this is a harmless idempotent re-write.
+                self.monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
+                log.info("Restored DVCC originals: %s / %s / %s",
+                         originals["battery_service"], originals["bms_instance"],
+                         originals["max_charge_voltage"])
+            except Exception:
+                log.error("CRITICAL: Failed to restore one or more DVCC originals")
+        else:
+            log.error("CRITICAL: no DVCC originals snapshot to restore from")
+
+        if self.temp_service is not None:
+            try:
+                self.temp_service.deregister()
+            except Exception:
+                pass
+
+        if self._aggregate_stopped:
+            try:
+                aggregate_driver.start()
+                self.monitor.invalidate_services()
+            except Exception:
+                log.error("CRITICAL: Failed to restart aggregate driver in teardown")
+            self._aggregate_stopped = False
+
+        release_lock()
+        delete_originals()
+        self._torn_down = True
+
+    def abort_teardown(self):
+        """Alias for service finally blocks — the guarded teardown belt-and-suspenders."""
+        self.teardown()

@@ -134,5 +134,96 @@ class TestHandOffIn(unittest.TestCase):
         magg.stop.assert_not_called()
 
 
+class TestTeardown(unittest.TestCase):
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_td.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
+
+    def _make(self, monitor):
+        t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
+        t.temp_service = MagicMock()
+        t._aggregate_stopped = True
+        t._originals = {"battery_service": "com.victronenergy.battery/277",
+                        "bms_instance": -1, "max_charge_voltage": 32.0}
+        return t
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_relay_closed_restores_from_snapshot_and_releases(self, mrelease, magg):
+        monitor = MockMonitor(relay_state=1)
+        recorded = {}
+        monitor.set_battery_service_setting = MagicMock(side_effect=lambda v: recorded.update(bs=v) or True)
+        monitor.set_bms_instance = MagicMock(side_effect=lambda v: recorded.update(bms=v) or True)
+        monitor.set_dvcc_max_charge_voltage = MagicMock(side_effect=lambda v: recorded.update(cvl=v) or True)
+        t = self._make(monitor)
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+
+        t.teardown()
+
+        self.assertEqual(recorded["bs"], "com.victronenergy.battery/277")  # NOT aggregate
+        self.assertEqual(recorded["bms"], -1)
+        self.assertEqual(recorded["cvl"], 32.0)  # NOT 28.4
+        t.temp_service.deregister.assert_called_once()
+        magg.start.assert_called_once()
+        mrelease.assert_called_once()
+        self.assertIsNone(takeover.load_originals())  # snapshot deleted
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_relay_open_holds_and_does_not_restore_or_release(self, mrelease, magg):
+        monitor = MockMonitor(relay_state=0)
+        t = self._make(monitor)
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+
+        t.teardown()
+
+        t.temp_service.deregister.assert_not_called()
+        mrelease.assert_not_called()
+        magg.start.assert_not_called()
+        self.assertTrue(self.alerting.raise_alarm.called)
+        self.assertIsNotNone(takeover.load_originals())  # snapshot KEPT for resume
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_relay_closed_uses_persisted_snapshot_when_originals_none(self, mrelease, magg):
+        # Resume case: self._originals is None; teardown must read the snapshot.
+        monitor = MockMonitor(relay_state=1)
+        recorded = {}
+        monitor.set_battery_service_setting = MagicMock(side_effect=lambda v: recorded.update(bs=v) or True)
+        t = self._make(monitor)
+        t._originals = None
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+
+        t.teardown()
+        self.assertEqual(recorded["bs"], "com.victronenergy.battery/277")
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_does_not_clear_alarm(self, mrelease, magg):
+        # teardown must NOT clear the alarm — a failure path raised one before
+        # calling teardown, and clearing it here would hide the failure.
+        monitor = MockMonitor(relay_state=1)
+        t = self._make(monitor)
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+        t.teardown()
+        self.alerting.clear_alarm.assert_not_called()
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_second_teardown_is_noop(self, mrelease, magg):
+        # The service finally re-calls teardown after a completed hand_back;
+        # the second call must do nothing (no double release / restore).
+        monitor = MockMonitor(relay_state=1)
+        t = self._make(monitor)
+        takeover.save_originals("com.victronenergy.battery/277", -1, 32.0)
+        t.teardown()
+        t.teardown()
+        mrelease.assert_called_once()
+        magg.start.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()
