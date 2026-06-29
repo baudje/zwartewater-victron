@@ -834,14 +834,12 @@ class TestResumeOnStartup(unittest.TestCase):
     @patch('fla_equalisation.startup_safety_check')
     @patch('fla_equalisation.is_temp_battery_running', return_value=True)
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    def test_relay_open_with_subprocess_resumes(
-        self, mock_acquire, mock_running, mock_safety, mock_threading,
-    ):
+    def test_relay_open_with_subprocess_resumes(self, mock_acquire, mock_running, mock_safety, mock_threading):
         monitor = MockMonitor(relay_state=0)
         Service, mock_recover = self._service(monitor)
-        Service()
-        # Orphan recovery saw relay open and was a no-op; resume started a worker;
-        # the normal startup safety check was skipped.
+        with patch('fla_equalisation.Takeover') as MockT:
+            MockT.resume_attach.return_value = MagicMock()
+            Service()
         mock_recover.assert_called_once_with(0)
         mock_threading.Thread.assert_called_once()
         mock_safety.assert_not_called()

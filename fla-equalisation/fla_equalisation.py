@@ -281,68 +281,38 @@ class FlaEqualisationService:
         log.info("FLA equalisation service started — checking every %ds", CHECK_INTERVAL_SEC)
 
     def _resume_interrupted_reconnect(self):
-        """Adopt and finish a reconnect interrupted mid-hold.
-
-        Returns True if this service took over (or another service owns it), so
-        the caller skips the normal startup_safety_check. Returns False when
-        there is nothing to resume (relay closed, or no holder subprocess)."""
+        """Adopt and finish a takeover interrupted mid-hand-back. Returns True if
+        this service took over (or another owns it), so the caller skips the
+        normal startup_safety_check."""
         if self.monitor.get_relay_state() != 0:
-            return False  # relay closed — nothing is isolated
+            return False
         if not is_temp_battery_running():
-            return False  # relay open but no holder — let startup_safety_check handle it
+            return False
         if not acquire_lock("fla-equalisation"):
             log.info("RESUME: another service owns the interrupted reconnect — backing off")
-            return True   # the other service handles it; skip our safety check
-        log.warning("RESUME: relay open + temp battery alive — adopting and finishing reconnect")
+            return True
+        t = Takeover.resume_attach(self.monitor, self.status, alerting,
+                                   "fla-equalisation", EQ_TAKEOVER_STATES)
+        if t is None:
+            # Snapshot missing — resume_attach already alarmed; hold (keep lock).
+            return True
+        log.warning("RESUME: adopting interrupted takeover and finishing hand-back")
         self._running = True
 
         def _worker():
-            temp_service = TempBatteryService(device_instance=100)
-            temp_service.attach()
             try:
-                self.status.update(state=STATE_VOLTAGE_MATCHING)
                 float_temp = self.monitor.get_battery_temperature()
-                matched, _ = wait_for_match(
-                    self.monitor, temp_service, self.status, alerting,
-                    voltage_delta_max=self.settings.voltage_delta_max,
+                matched, _ = t.hand_back(
                     float_voltage=temp_compensate(self.settings.float_voltage, float_temp),
+                    voltage_delta_max=self.settings.voltage_delta_max,
                 )
-                if not matched:
-                    return  # safe-hold never returns in production; guard anyway
-                self.status.update(state=STATE_RECONNECTING)
-                if not close_relay_verified(self.monitor):
-                    raise_alarm("RESUME: failed to close relay 2", status_service=self.status)
-                    return
-                time.sleep(2)
+                # teardown no longer clears the alarm; the success path owns it.
+                if matched:
+                    clear_alarm(status_service=self.status)
             except Exception as e:
                 log.exception("RESUME worker error: %s", e)
+                t.abort_teardown()
             finally:
-                # Mirror the relay-state-guarded teardown. The interrupted run's
-                # saved DVCC originals are lost, so restore to known-safe normals.
-                if self.monitor.get_relay_state() == 1:
-                    try:
-                        temp_service.deregister()
-                    except Exception:
-                        pass
-                    try:
-                        self.monitor.set_battery_service_setting("com.victronenergy.battery.aggregate")
-                        self.monitor.set_bms_instance(-1)
-                        self.monitor.set_dvcc_max_charge_voltage(LFP_SAFE_CVL)
-                    except Exception:
-                        log.error("RESUME: failed to restore DVCC to normal")
-                    try:
-                        start_aggregate_driver()
-                        self.monitor.invalidate_services()
-                    except Exception:
-                        log.error("RESUME: failed to restart aggregate driver")
-                    release_lock()
-                    alerting.clear_alarm(status_service=self.status)
-                    log.info("RESUME: reconnect completed, control handed back to aggregate")
-                else:
-                    raise_alarm(
-                        "RESUME incomplete — bus held by temp battery, manual intervention required",
-                        status_service=self.status,
-                    )
                 self._running = False
 
         threading.Thread(target=_worker, daemon=True).start()
