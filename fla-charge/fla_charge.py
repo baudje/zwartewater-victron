@@ -163,6 +163,7 @@ def run_charge(settings, monitor, status):
     original_dvcc_voltage = None
     original_battery_service = None
     original_bms_instance = None
+    aborted_by_operator = False
 
     if not acquire_lock("fla-charge"):
         log.info("Operation lock held — skipping")
@@ -390,11 +391,12 @@ def run_charge(settings, monitor, status):
                 break
 
             if check_abort():
-                log.warning("Abort requested via web UI during absorption")
+                # Relay is open here (LFP isolated) — break into the controlled
+                # reconnect instead of hard-stopping and free-falling the bus.
+                log.warning("Operator abort during absorption — proceeding to controlled reconnect")
                 clear_abort()
-                status.update(state=STATE_ERROR)
-                alerting.raise_alarm("FLA charge aborted by operator", status_service=status)
-                return False
+                aborted_by_operator = True
+                break
 
             if int(elapsed) % 300 < 30:
                 log.info("Absorption: %.0f min, V=%.1fV, I=%.1fA",
@@ -456,9 +458,12 @@ def run_charge(settings, monitor, status):
             return False
         monitor.invalidate_services()
 
-        write_last_charge()
         status.update(state=STATE_IDLE, time_remaining=0)
         alerting.clear_alarm(status_service=status)
+        if aborted_by_operator:
+            log.info("Operator-aborted charge reconnected safely — not recording completion")
+            return False
+        write_last_charge()
         log.info("FLA charge completed successfully")
         return True
 
@@ -469,36 +474,50 @@ def run_charge(settings, monitor, status):
         return False
 
     finally:
-        # Restore DVCC settings before anything else
-        if original_bms_instance is not None:
-            try:
-                monitor.set_bms_instance(original_bms_instance)
-                log.info("BmsInstance restored to %s", original_bms_instance)
-            except Exception:
-                log.error("CRITICAL: Failed to restore BmsInstance setting")
+        # Teardown is SAFE ONLY once the relay is confirmed closed — handing back
+        # to DVCC while the LFP is isolated free-falls the bus. Branch on relay
+        # state (belt-and-suspenders; the safe-hold means we normally never reach
+        # here with the relay open).
+        if monitor.get_relay_state() != 1:
+            log.error("CLEANUP: relay open at exit — holding bus, NOT tearing down")
+            alerting.raise_alarm(
+                "Reconnect incomplete — bus held by temp battery, manual intervention required",
+                status_service=status,
+            )
+        else:
+            if original_bms_instance is not None:
+                try:
+                    monitor.set_bms_instance(original_bms_instance)
+                    log.info("BmsInstance restored to %s", original_bms_instance)
+                except Exception:
+                    log.error("CRITICAL: Failed to restore BmsInstance setting")
 
-        if original_battery_service is not None:
-            try:
-                monitor.set_battery_service_setting(original_battery_service)
-                log.info("BatteryService restored to %s", original_battery_service)
-            except Exception:
-                log.error("CRITICAL: Failed to restore BatteryService setting")
+            if original_battery_service is not None:
+                try:
+                    monitor.set_battery_service_setting(original_battery_service)
+                    log.info("BatteryService restored to %s", original_battery_service)
+                except Exception:
+                    log.error("CRITICAL: Failed to restore BatteryService setting")
 
-        if original_dvcc_voltage is not None:
-            try:
-                monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
-                log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
-            except Exception:
-                log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
+            if original_dvcc_voltage is not None:
+                try:
+                    monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
+                    log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
+                except Exception:
+                    log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
 
-        if temp_service is not None:
-            try: temp_service.deregister()
-            except Exception: pass
-        close_relay_delta_aware(monitor, alerting, status)
-        if aggregate_stopped:
-            try: start_aggregate()
-            except Exception: log.error("CRITICAL: Failed to restart aggregate driver")
-        release_lock()
+            if temp_service is not None:
+                try:
+                    temp_service.deregister()
+                except Exception:
+                    pass
+            close_relay_delta_aware(monitor, alerting, status)
+            if aggregate_stopped:
+                try:
+                    start_aggregate()
+                except Exception:
+                    log.error("CRITICAL: Failed to restart aggregate driver")
+            release_lock()
 
 
 class FlaChargeService:
