@@ -926,5 +926,68 @@ class TestStatusServiceDeregisterFailsFast(unittest.TestCase):
         svc.clear_alarm_path()
 
 
+class TestResumeOnStartup(unittest.TestCase):
+    """Startup adopts an interrupted hold instead of killing it."""
+
+    def _service(self, monitor):
+        """Build a FlaEqualisationService with construction side-effects stubbed.
+
+        Uses start()/addCleanup(stop) rather than a with-block so patches remain
+        active when Service() is called from the test method body (returning from
+        inside a with-block exits the context managers, removing the patches).
+        """
+        from fla_equalisation import FlaEqualisationService
+
+        p_recover = patch('fla_equalisation.recover_orphan_temp_battery')
+        p_settings = patch('fla_equalisation.Settings', return_value=MockSettings())
+        p_monitor = patch('fla_equalisation.DbusMonitor', return_value=monitor)
+        p_status = patch('fla_equalisation.StatusService', return_value=MockStatus())
+        p_update = patch.object(FlaEqualisationService, '_update_idle_status')
+
+        mock_recover = p_recover.start()
+        p_settings.start()
+        p_monitor.start()
+        p_status.start()
+        p_update.start()
+
+        self.addCleanup(p_recover.stop)
+        self.addCleanup(p_settings.stop)
+        self.addCleanup(p_monitor.stop)
+        self.addCleanup(p_status.stop)
+        self.addCleanup(p_update.stop)
+
+        return FlaEqualisationService, mock_recover
+
+    @patch('fla_equalisation.threading')
+    @patch('fla_equalisation.startup_safety_check')
+    @patch('fla_equalisation.is_temp_battery_running', return_value=True)
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    def test_relay_open_with_subprocess_resumes(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        # Orphan recovery saw relay open and was a no-op; resume started a worker;
+        # the normal startup safety check was skipped.
+        mock_recover.assert_called_once_with(0)
+        mock_threading.Thread.assert_called_once()
+        mock_safety.assert_not_called()
+
+    @patch('fla_equalisation.threading')
+    @patch('fla_equalisation.startup_safety_check')
+    @patch('fla_equalisation.is_temp_battery_running', return_value=False)
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    def test_relay_closed_runs_normal_safety_check(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=1)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        mock_recover.assert_called_once_with(1)
+        mock_threading.Thread.assert_not_called()
+        mock_safety.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()
