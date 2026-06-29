@@ -266,9 +266,6 @@ def run_charge(settings, monitor, status):
             i_trojan = monitor.get_trojan_current()
             v_lfp = monitor.get_lfp_voltage()
 
-            if v_trojan is not None and i_trojan is not None:
-                t.temp_service.update_voltage_current(v_trojan, i_trojan)
-
             current_state = STATE_PHASE3_ABSORPTION if elapsed > 300 else STATE_PHASE2_BULK
             delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
             status.update(

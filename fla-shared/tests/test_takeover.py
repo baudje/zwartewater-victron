@@ -134,13 +134,9 @@ class TestHandOffIn(unittest.TestCase):
         magg.stop.assert_not_called()
 
 
-class TestTeardown(unittest.TestCase):
-    def setUp(self):
-        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_td.json")
-        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
-        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
-        self.alerting = MagicMock()
-        self.status = MockStatus()
+class _TakeoverFixtureMixin:
+    """Shared fixture: a Takeover with a mock temp service, the aggregate marked
+    stopped, and a representative DVCC-originals snapshot."""
 
     def _make(self, monitor):
         t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
@@ -149,6 +145,15 @@ class TestTeardown(unittest.TestCase):
         t._originals = {"battery_service": "com.victronenergy.battery/277",
                         "bms_instance": -1, "max_charge_voltage": 32.0}
         return t
+
+
+class TestTeardown(_TakeoverFixtureMixin, unittest.TestCase):
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_td.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.release_lock')
@@ -257,21 +262,13 @@ class TestTeardown(unittest.TestCase):
         magg.start.assert_called_once()
 
 
-class TestHandBack(unittest.TestCase):
+class TestHandBack(_TakeoverFixtureMixin, unittest.TestCase):
     def setUp(self):
         self._tmp = os.path.join(os.path.dirname(__file__), "_snap_hb.json")
         p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
         self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
         self.alerting = MagicMock()
         self.status = MockStatus()
-
-    def _make(self, monitor):
-        t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
-        t.temp_service = MagicMock()
-        t._aggregate_stopped = True
-        t._originals = {"battery_service": "com.victronenergy.battery/277",
-                        "bms_instance": -1, "max_charge_voltage": 32.0}
-        return t
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.release_lock')

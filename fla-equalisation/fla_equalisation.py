@@ -159,8 +159,6 @@ def run_equalisation(settings, monitor, status):
             elapsed = time.time() - eq_start
             v_trojan = monitor.get_trojan_voltage()
             i_trojan = monitor.get_trojan_current()
-            if v_trojan is not None and i_trojan is not None:
-                t.temp_service.update_voltage_current(v_trojan, i_trojan)
             v_lfp = monitor.get_lfp_voltage()
             remaining = max(0, eq_timeout - elapsed)
             delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
