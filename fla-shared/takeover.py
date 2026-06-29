@@ -92,6 +92,7 @@ class Takeover:
         self._aggregate_stopped = False
         self._originals = None
         self._torn_down = False
+        self._dvcc_switched = False  # True once DVCC has been pointed at the temp battery
 
     def _fail(self, message):
         """Alarm, tear down, and signal failure."""
@@ -140,6 +141,9 @@ class Takeover:
                  originals["max_charge_voltage"])
 
         # 5. Switch DVCC to the temp battery and CONFIRM before touching the relay.
+        #    From here on DVCC is (at least partially) switched, so teardown must
+        #    restore the originals on any later failure.
+        self._dvcc_switched = True
         if not self.monitor.set_battery_service_setting(TEMP_SERVICE):
             return self._fail("Failed to switch BatteryService to temp battery")
         if not self.monitor.set_bms_instance(TEMP_INSTANCE):
@@ -185,38 +189,10 @@ class Takeover:
             )
             return  # NOT torn down — a later teardown (relay since closed) may still restore
 
-        originals = self._originals or load_originals()
-        if originals is not None:
-            try:
-                self.monitor.set_bms_instance(originals["bms_instance"])
-                log.info("BmsInstance restored to %s", originals["bms_instance"])
-            except Exception:
-                log.error("CRITICAL: Failed to restore BmsInstance")
-            try:
-                self.monitor.set_battery_service_setting(originals["battery_service"])
-                log.info("BatteryService restored to %s", originals["battery_service"])
-            except Exception:
-                log.error("CRITICAL: Failed to restore BatteryService")
-            try:
-                # Restore the ceiling here too (not only in hand_back): covers the
-                # edge where the relay closed without a hand_back — e.g. an external
-                # relay close detected mid-loop at high CVL — so the ceiling never
-                # gets stranded raised. On the normal path hand_back already lowered
-                # it to the same value, so this is a harmless idempotent re-write.
-                self.monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
-                log.info("DVCC MaxChargeVoltage restored to %s", originals["max_charge_voltage"])
-            except Exception:
-                log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
-        else:
-            log.error("CRITICAL: no DVCC originals snapshot to restore from")
-
-        if self.temp_service is not None:
-            try:
-                self.temp_service.deregister()
-            except Exception:
-                pass
-            self.temp_service = None
-
+        # Bring the aggregate driver back up FIRST, while the temp battery is
+        # still registered and selected (holding CVL at float), so DVCC always
+        # has a valid CVL source — never a window where the selection points at a
+        # service that isn't running yet.
         if self._aggregate_stopped:
             try:
                 aggregate_driver.start()
@@ -225,8 +201,54 @@ class Takeover:
                 log.error("CRITICAL: Failed to restart aggregate driver in teardown")
             self._aggregate_stopped = False
 
-        release_lock()
+        # Hand DVCC selection back to the aggregate — but ONLY if we actually
+        # switched it. An early hand_off_in failure (temp register / aggregate
+        # stop / systemcalc) changed nothing, so there is nothing to restore and
+        # no snapshot is expected. Restore each field only when it was readable
+        # at snapshot time; a None means the read glitched and writing it back
+        # would corrupt the setting (set_battery_service_setting(None) writes the
+        # literal string "None"; set_bms_instance(None) raises).
+        if self._dvcc_switched:
+            originals = self._originals or load_originals()
+            if originals is None:
+                log.error("CRITICAL: DVCC was switched but no originals snapshot to restore from")
+            else:
+                if originals.get("bms_instance") is not None:
+                    try:
+                        self.monitor.set_bms_instance(originals["bms_instance"])
+                        log.info("BmsInstance restored to %s", originals["bms_instance"])
+                    except Exception:
+                        log.error("CRITICAL: Failed to restore BmsInstance")
+                if originals.get("battery_service") is not None:
+                    try:
+                        self.monitor.set_battery_service_setting(originals["battery_service"])
+                        log.info("BatteryService restored to %s", originals["battery_service"])
+                    except Exception:
+                        log.error("CRITICAL: Failed to restore BatteryService")
+                if originals.get("max_charge_voltage") is not None:
+                    # Restored here too (not only in hand_back): covers the edge
+                    # where the relay closed without a hand_back — e.g. an external
+                    # relay close detected mid-loop at high CVL — so the ceiling is
+                    # never stranded raised. On the normal path hand_back already
+                    # lowered it, making this a harmless idempotent re-write.
+                    try:
+                        self.monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
+                        log.info("DVCC MaxChargeVoltage restored to %s", originals["max_charge_voltage"])
+                    except Exception:
+                        log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
+
+        # The temp battery is no longer the selected BMS — safe to deregister.
+        if self.temp_service is not None:
+            try:
+                self.temp_service.deregister()
+            except Exception:
+                pass
+            self.temp_service = None
+
+        # Delete the snapshot BEFORE releasing the lock, so the next operation to
+        # acquire the lock can't have its fresh snapshot deleted out from under it.
         delete_originals()
+        release_lock()
         self._torn_down = True
 
     def hand_back(self, float_voltage, voltage_delta_max, cache_callback=None):
@@ -288,5 +310,6 @@ class Takeover:
         t.temp_service.attach()
         t._originals = originals
         t._aggregate_stopped = True  # the interrupted operation stopped it
+        t._dvcc_switched = True       # the interrupted operation had switched DVCC
         log.warning("RESUME: adopted interrupted takeover (snapshot loaded)")
         return t

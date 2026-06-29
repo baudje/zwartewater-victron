@@ -142,6 +142,7 @@ class _TakeoverFixtureMixin:
         t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
         t.temp_service = MagicMock()
         t._aggregate_stopped = True
+        t._dvcc_switched = True  # represents a completed hand_off_in
         t._originals = {"battery_service": "com.victronenergy.battery/277",
                         "bms_instance": -1, "max_charge_voltage": 32.0}
         return t
@@ -260,6 +261,45 @@ class TestTeardown(_TakeoverFixtureMixin, unittest.TestCase):
         t.teardown()
         mrelease.assert_called_once()
         magg.start.assert_called_once()
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_dvcc_not_switched_skips_restore(self, mrelease, magg):
+        # Early hand_off_in failure: DVCC was never switched, so teardown must
+        # NOT attempt any restore (and must not log a spurious "no snapshot").
+        monitor = MockMonitor(relay_state=1)
+        monitor.set_bms_instance = MagicMock()
+        monitor.set_battery_service_setting = MagicMock()
+        monitor.set_dvcc_max_charge_voltage = MagicMock()
+        t = self._make(monitor)
+        t._dvcc_switched = False          # nothing was switched
+        t._originals = None
+
+        t.teardown()
+
+        monitor.set_bms_instance.assert_not_called()
+        monitor.set_battery_service_setting.assert_not_called()
+        monitor.set_dvcc_max_charge_voltage.assert_not_called()
+        mrelease.assert_called_once()     # still releases lock + cleans up
+        self.assertTrue(t._torn_down)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_none_original_field_is_not_written_back(self, mrelease, magg):
+        # A snapshot field that was unreadable at handoff (None) must NOT be
+        # written back — set_battery_service_setting(None) would store "None".
+        monitor = MockMonitor(relay_state=1)
+        monitor.set_bms_instance = MagicMock()
+        monitor.set_battery_service_setting = MagicMock()
+        monitor.set_dvcc_max_charge_voltage = MagicMock()
+        t = self._make(monitor)
+        t._originals = {"battery_service": None, "bms_instance": -1, "max_charge_voltage": 32.0}
+
+        t.teardown()
+
+        monitor.set_battery_service_setting.assert_not_called()   # None skipped
+        monitor.set_bms_instance.assert_called_once_with(-1)      # readable ones restored
+        monitor.set_dvcc_max_charge_voltage.assert_called_once_with(32.0)
 
 
 class TestHandBack(_TakeoverFixtureMixin, unittest.TestCase):
