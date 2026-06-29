@@ -187,106 +187,20 @@ class TestSafetyGuards(unittest.TestCase):
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    def test_aggregate_stop_failure_aborts(self, mock_start, mock_stop, mock_lock, mock_unlock):
+    def test_hand_off_in_failure_aborts(self, mock_lock, mock_unlock):
+        # The individual handoff-step safety guards (temp-battery register,
+        # aggregate stop, systemcalc restart, BMS-switch confirmation, relay
+        # open) now live in the Takeover and are covered by test_takeover.py.
+        # Here we only assert run_equalisation surfaces a hand_off_in failure.
         settings, monitor, status = self._make_mocks()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = False
+            MockT.return_value = inst
             result = run_equalisation(settings, monitor, status)
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
-
-    @patch('fla_equalisation.release_lock')
-    @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    def test_relay_open_failure_aborts(self, mock_start, mock_stop, mock_lock, mock_unlock):
-        settings, monitor, status = self._make_mocks()
-        monitor.set_relay = MagicMock(return_value=False)
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
-            result = run_equalisation(settings, monitor, status)
-        self.assertFalse(result)
-        self.assertIn(STATE_ERROR, status.states)
-
-    @patch('fla_equalisation.release_lock')
-    @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.time')
-    def test_high_lfp_current_after_relay_open_aborts(self, mock_time, mock_start, mock_stop,
-                                                       mock_lock, mock_unlock):
-        """CRIT-2 test: if LFP current > 5A after relay open, abort."""
-        settings, monitor, status = self._make_mocks(lfp_current=20.0)
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
-            result = run_equalisation(settings, monitor, status)
-        self.assertFalse(result)
-        self.assertIn(STATE_ERROR, status.states)
-
-    @patch('fla_equalisation.release_lock')
-    @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    def test_temp_service_register_failure_aborts_before_stopping_driver(
-        self, mock_start, mock_stop, mock_lock, mock_unlock
-    ):
-        settings, monitor, status = self._make_mocks()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            mock_tbs = MagicMock()
-            mock_tbs.register.return_value = False
-            MockTBS.return_value = mock_tbs
-            result = run_equalisation(settings, monitor, status)
-        self.assertFalse(result)
-        self.assertIn(STATE_ERROR, status.states)
-        mock_stop.assert_not_called()
-
-    @patch('fla_equalisation.release_lock')
-    @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=False)
-    @patch('fla_equalisation.time')
-    def test_systemcalc_restart_failure_aborts_before_relay_open(
-        self, mock_time, mock_open, mock_start, mock_stop, mock_lock, mock_unlock
-    ):
-        settings, monitor, status = self._make_mocks()
-        monitor.restart_systemcalc = MagicMock(return_value=False)
-        mock_time.sleep = MagicMock()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            mock_tbs = MagicMock()
-            mock_tbs.register.return_value = True
-            MockTBS.return_value = mock_tbs
-            result = run_equalisation(settings, monitor, status)
-        self.assertFalse(result)
-        self.assertIn(STATE_ERROR, status.states)
-        mock_open.assert_not_called()
-
-    @patch('fla_equalisation.release_lock')
-    @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=False)
-    @patch('fla_equalisation.time')
-    def test_bms_switch_confirmation_failure_aborts_before_relay_open(
-        self, mock_time, mock_open, mock_start, mock_stop, mock_lock, mock_unlock
-    ):
-        settings, monitor, status = self._make_mocks()
-        monitor.restart_systemcalc = MagicMock(return_value=True)
-        monitor.wait_for_bms_selection = MagicMock(return_value=False)
-        mock_time.sleep = MagicMock()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            mock_tbs = MagicMock()
-            mock_tbs.register.return_value = True
-            MockTBS.return_value = mock_tbs
-            result = run_equalisation(settings, monitor, status)
-        self.assertFalse(result)
-        self.assertIn(STATE_ERROR, status.states)
-        monitor.wait_for_bms_selection.assert_called_once_with(
-            "com.victronenergy.battery/100", 100
-        )
-        mock_open.assert_not_called()
+        inst.abort_teardown.assert_called_once()
 
 
 class TestOperatorAbortRouting(unittest.TestCase):
@@ -299,86 +213,86 @@ class TestOperatorAbortRouting(unittest.TestCase):
         return settings, monitor, status
 
     @patch('fla_equalisation.write_last_equalisation')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.2))
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
     @patch('fla_equalisation.check_abort', return_value=True)
     @patch('fla_equalisation.time')
     def test_operator_abort_reconnects_without_timestamp(
-        self, mock_time, mock_abort, mock_lock, mock_unlock, mock_open, mock_verify,
-        mock_stop, mock_start, mock_close, mock_match, mock_write,
+        self, mock_time, mock_abort, mock_lock, mock_unlock, mock_write,
     ):
         mock_time.time.side_effect = [i for i in range(0, 200, 5)]
         mock_time.sleep = MagicMock()
         settings, monitor, status = self._make_mocks()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.2)
+            MockT.return_value = inst
             with patch('fla_equalisation.update_cache'):
                 result = run_equalisation(settings, monitor, status)
 
-        # Reconnect happened…
-        mock_match.assert_called_once()
-        mock_close.assert_called_once()
+        # Operator abort routed through the controlled reconnect (hand_back)…
+        inst.hand_back.assert_called_once()
         # …but the run is flagged non-completion: no timestamp, returns False.
         mock_write.assert_not_called()
         self.assertFalse(result)
+        # The guarded teardown still runs in the finally.
+        inst.abort_teardown.assert_called_once()
 
 
 class TestRelayStateGuardedFinally(unittest.TestCase):
-    """The finally must not tear down while the relay is open."""
+    """The finally always routes teardown through the Takeover.
+
+    The relay-state-guarded restore (hold the bus while the relay is open,
+    restore DVCC + release the lock once it is closed) now lives in
+    Takeover.teardown and is covered by test_takeover.py::TestTeardown. Here
+    we only assert run_equalisation delegates to abort_teardown in its finally
+    on both a mid-EQ hard error and a hand_off_in failure."""
 
     @patch('fla_equalisation.raise_alarm')
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
     @patch('fla_equalisation.time')
-    def test_relay_open_exit_holds_and_does_not_teardown(
-        self, mock_time, mock_lock, mock_unlock, mock_open, mock_verify,
-        mock_stop, mock_start, mock_alarm,
+    def test_mid_eq_error_routes_teardown_through_takeover(
+        self, mock_time, mock_lock, mock_unlock, mock_alarm,
     ):
-        # Trojan goes unresponsive mid-EQ (hard error) → return False with relay open.
+        # Trojan goes unresponsive mid-EQ (hard error) → return False; the
+        # finally hands off to the Takeover's guarded teardown.
         mock_time.time.side_effect = [i for i in range(0, 200, 5)]
         mock_time.sleep = MagicMock()
         settings = MockSettings()
         monitor = MockMonitor(relay_state=0, lfp_voltage=27.0)
         monitor.get_trojan_voltage = MagicMock(return_value=None)  # unresponsive
         status = MockStatus()
-        temp = MagicMock()
-        with patch('fla_equalisation.TempBatteryService', return_value=temp):
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            MockT.return_value = inst
             with patch('fla_equalisation.update_cache'):
                 result = run_equalisation(settings, monitor, status)
 
         self.assertFalse(result)
-        temp.deregister.assert_not_called()      # temp battery left holding
-        mock_unlock.assert_not_called()          # lock stays held
-        self.assertTrue(mock_alarm.called)       # hold alarm raised
+        self.assertTrue(mock_alarm.called)         # loop raised the hard-error alarm
+        inst.abort_teardown.assert_called_once()   # finally routed through the Takeover
 
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=False)
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    def test_relay_closed_exit_tears_down_normally(
-        self, mock_lock, mock_unlock, mock_stop, mock_start, mock_close,
+    def test_hand_off_failure_routes_teardown_through_takeover(
+        self, mock_lock, mock_unlock,
     ):
-        # stop_aggregate fails before relay ever opens → relay stays closed.
+        # hand_off_in fails before the relay ever opens → return False; the
+        # finally still routes teardown through the Takeover.
         settings = MockSettings()
         monitor = MockMonitor(relay_state=1)
         status = MockStatus()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = False
+            MockT.return_value = inst
             result = run_equalisation(settings, monitor, status)
 
         self.assertFalse(result)
-        mock_unlock.assert_called_once()         # normal teardown released the lock
+        inst.abort_teardown.assert_called_once()   # finally routed through the Takeover
 
 
 class TestFinallySafety(unittest.TestCase):
@@ -519,24 +433,15 @@ class TestRunEqualisationHappyPath(unittest.TestCase):
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
     @patch('fla_equalisation.write_last_equalisation')
     @patch('fla_equalisation.clear_alarm')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
     def test_full_success_returns_true(self, mock_time, mock_cache, mock_clear,
-                                       mock_write_eq, mock_match, mock_delta_close,
-                                       mock_close, mock_relay_check, mock_verify,
-                                       mock_open, mock_start, mock_stop,
+                                       mock_write_eq, mock_relay_check,
                                        mock_lock, mock_unlock):
-        """Full EQ sequence with all steps succeeding returns True."""
+        """Full EQ sequence with handoff/reconnect via Takeover returns True."""
         # EQ loop: first iteration sees current below threshold → complete
         mock_time.time.side_effect = [0, 5, 10]
         mock_time.sleep = MagicMock()
@@ -544,46 +449,42 @@ class TestRunEqualisationHappyPath(unittest.TestCase):
             trojan_voltage=31.5, trojan_current=5.0,  # Below eq_current_complete=10
             lfp_voltage=28.0,
         )
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.3)
+            MockT.return_value = inst
             result = run_equalisation(settings, monitor, status)
         self.assertTrue(result)
         mock_write_eq.assert_called_once()
         mock_clear.assert_called_once()
+        inst.abort_teardown.assert_called_once()  # finally still routes through Takeover
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
     @patch('fla_equalisation.write_last_equalisation')
     @patch('fla_equalisation.clear_alarm')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
     def test_state_transitions_in_order(self, mock_time, mock_cache, mock_clear,
-                                         mock_write_eq, mock_match, mock_delta_close,
-                                         mock_close, mock_relay_check, mock_verify,
-                                         mock_open, mock_start, mock_stop,
+                                         mock_write_eq, mock_relay_check,
                                          mock_lock, mock_unlock):
-        """States should progress through full sequence."""
+        """The states run_equalisation itself emits, in order. The handoff and
+        reconnect display states (STOPPING_DRIVER … RESTARTING_DRIVER) are now
+        set inside the Takeover and asserted in test_takeover.py."""
         mock_time.time.side_effect = [0, 5, 10]
         mock_time.sleep = MagicMock()
         settings, monitor, status = self._make_mocks(
             trojan_voltage=31.5, trojan_current=5.0, lfp_voltage=28.0,
         )
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.3)
+            MockT.return_value = inst
             run_equalisation(settings, monitor, status)
-        expected_order = [
-            STATE_STOPPING_DRIVER, STATE_DISCONNECTING, STATE_EQUALISING,
-            STATE_VOLTAGE_MATCHING, STATE_RECONNECTING, STATE_RESTARTING_DRIVER,
-            STATE_IDLE,
-        ]
+        expected_order = [STATE_EQUALISING, STATE_IDLE]
         self.assertEqual(status.states, expected_order)
 
 
@@ -592,17 +493,11 @@ class TestOrionFailureDetection(unittest.TestCase):
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
-    def test_lfp_voltage_drop_triggers_alarm(self, mock_time, mock_cache, mock_delta_close,
-                                              mock_relay_check, mock_verify, mock_open,
-                                              mock_start, mock_stop, mock_lock, mock_unlock):
+    def test_lfp_voltage_drop_triggers_alarm(self, mock_time, mock_cache,
+                                              mock_relay_check, mock_lock, mock_unlock):
         """LFP voltage dropping > 0.5V from disconnect indicates Orion failure."""
         mock_time.time.side_effect = [0, 5, 10, 15]
         mock_time.sleep = MagicMock()
@@ -621,30 +516,23 @@ class TestOrionFailureDetection(unittest.TestCase):
 
         settings = MockSettings()
         status = MockStatus()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            MockT.return_value = inst
             result = run_equalisation(settings, monitor, status)
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
     @patch('fla_equalisation.write_last_equalisation')
     @patch('fla_equalisation.clear_alarm')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
     def test_lfp_voltage_stable_no_alarm(self, mock_time, mock_cache, mock_clear,
-                                          mock_write_eq, mock_match, mock_delta_close,
-                                          mock_close, mock_relay_check, mock_verify,
-                                          mock_open, mock_start, mock_stop,
+                                          mock_write_eq, mock_relay_check,
                                           mock_lock, mock_unlock):
         """LFP voltage stable (within 0.3V) should not trigger Orion alarm."""
         mock_time.time.side_effect = [0, 5, 10]
@@ -655,29 +543,23 @@ class TestOrionFailureDetection(unittest.TestCase):
         )
         settings = MockSettings()
         status = MockStatus()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.3)
+            MockT.return_value = inst
             result = run_equalisation(settings, monitor, status)
         self.assertTrue(result)
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
     @patch('fla_equalisation.write_last_equalisation')
     @patch('fla_equalisation.clear_alarm')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
     def test_lfp_voltage_none_no_false_alarm(self, mock_time, mock_cache, mock_clear,
-                                              mock_write_eq, mock_match, mock_delta_close,
-                                              mock_close, mock_relay_check, mock_verify,
-                                              mock_open, mock_start, mock_stop,
+                                              mock_write_eq, mock_relay_check,
                                               mock_lock, mock_unlock):
         """LFP voltage=None should not trigger false Orion alarm."""
         mock_time.time.side_effect = [0, 5, 10]
@@ -695,8 +577,11 @@ class TestOrionFailureDetection(unittest.TestCase):
         monitor.get_lfp_voltage = lfp_v_goes_none
         settings = MockSettings()
         status = MockStatus()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            MockTBS.return_value = MagicMock()
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.3)
+            MockT.return_value = inst
             result = run_equalisation(settings, monitor, status)
         # Should still succeed — None doesn't trigger the Orion check
         self.assertTrue(result)
@@ -707,24 +592,19 @@ class TestTempCompensationIntegration(unittest.TestCase):
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
     @patch('fla_equalisation.write_last_equalisation')
     @patch('fla_equalisation.clear_alarm')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
     def test_cold_temp_raises_cvl(self, mock_time, mock_cache, mock_clear,
-                                   mock_write_eq, mock_match, mock_delta_close,
-                                   mock_close, mock_relay_check, mock_verify,
-                                   mock_open, mock_start, mock_stop,
+                                   mock_write_eq, mock_relay_check,
                                    mock_lock, mock_unlock):
-        """At 15°C, temperature compensation should raise CVL above base."""
+        """At 15°C, the compensated EQ target handed to the Takeover rises above base.
+
+        run_equalisation computes temp_compensate(eq_voltage, temp) and passes it
+        as hand_off_in's target_voltage; the Takeover then drives the temp-battery
+        CVL (covered in test_takeover.py)."""
         mock_time.time.side_effect = [0, 5, 10]
         mock_time.sleep = MagicMock()
         monitor = MockMonitor(
@@ -733,36 +613,27 @@ class TestTempCompensationIntegration(unittest.TestCase):
         )
         settings = MockSettings()
         status = MockStatus()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            mock_tbs = MagicMock()
-            MockTBS.return_value = mock_tbs
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.3)
+            MockT.return_value = inst
             run_equalisation(settings, monitor, status)
-        # temp_compensate(31.5, 15.0) = 31.5 + 0.6 = 32.1
-        # set_charge_voltage should be called with 32.1
-        cvl_calls = [c for c in mock_tbs.set_charge_voltage.call_args_list]
-        self.assertTrue(any(abs(c[0][0] - 32.1) < 0.01 for c in cvl_calls),
-                        f"Expected CVL ~32.1, got calls: {cvl_calls}")
+        # temp_compensate(31.5, 15.0) = 31.5 + 0.6 = 32.1 → hand_off_in target
+        target = inst.hand_off_in.call_args.kwargs["target_voltage"]
+        self.assertAlmostEqual(target, 32.1, places=2)
 
     @patch('fla_equalisation.release_lock')
     @patch('fla_equalisation.acquire_lock', return_value=True)
-    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
-    @patch('fla_equalisation.open_relay', return_value=True)
-    @patch('fla_equalisation.verify_relay_open', return_value=True)
     @patch('fla_equalisation.verify_relay_still_open', return_value=True)
-    @patch('fla_equalisation.close_relay_verified', return_value=True)
-    @patch('fla_equalisation.close_relay_delta_aware')
-    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.3))
     @patch('fla_equalisation.write_last_equalisation')
     @patch('fla_equalisation.clear_alarm')
     @patch('fla_equalisation.update_cache')
     @patch('fla_equalisation.time')
     def test_none_temp_uses_base_voltage(self, mock_time, mock_cache, mock_clear,
-                                          mock_write_eq, mock_match, mock_delta_close,
-                                          mock_close, mock_relay_check, mock_verify,
-                                          mock_open, mock_start, mock_stop,
+                                          mock_write_eq, mock_relay_check,
                                           mock_lock, mock_unlock):
-        """No temperature reading should use base eq_voltage unchanged."""
+        """No temperature reading should hand off the base eq_voltage unchanged."""
         mock_time.time.side_effect = [0, 5, 10]
         mock_time.sleep = MagicMock()
         monitor = MockMonitor(
@@ -771,14 +642,15 @@ class TestTempCompensationIntegration(unittest.TestCase):
         )
         settings = MockSettings()
         status = MockStatus()
-        with patch('fla_equalisation.TempBatteryService') as MockTBS:
-            mock_tbs = MagicMock()
-            MockTBS.return_value = mock_tbs
+        with patch('fla_equalisation.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.3)
+            MockT.return_value = inst
             run_equalisation(settings, monitor, status)
-        # temp_compensate(31.5, None) = 31.5 unchanged
-        cvl_calls = [c for c in mock_tbs.set_charge_voltage.call_args_list]
-        self.assertTrue(any(abs(c[0][0] - 31.5) < 0.01 for c in cvl_calls),
-                        f"Expected CVL ~31.5, got calls: {cvl_calls}")
+        # temp_compensate(31.5, None) = 31.5 unchanged → hand_off_in target
+        target = inst.hand_off_in.call_args.kwargs["target_voltage"]
+        self.assertAlmostEqual(target, 31.5, places=2)
 
 
 class TestRunEqualisationLockHeld(unittest.TestCase):
