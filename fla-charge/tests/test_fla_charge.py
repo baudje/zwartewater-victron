@@ -163,21 +163,19 @@ class TestRunChargeSafety(unittest.TestCase):
         status = MockStatus()
         return settings, monitor, status
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=False)
-    def test_lock_held_returns_false(self, mock_lock, mock_unlock):
+    def test_lock_held_returns_false(self, mock_lock):
         settings, monitor, status = self._make_mocks()
         result = run_charge(settings, monitor, status)
         self.assertFalse(result)
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.update_cache')
     @patch('fla_charge.time')
     def test_hand_off_in_failure_aborts(self, mock_time, mock_cache, mock_cell_v,
-                                        mock_ac, mock_lock, mock_unlock):
+                                        mock_ac, mock_lock):
         # The individual handoff-step safety guards (temp-battery register,
         # aggregate stop, systemcalc restart, BMS-switch confirmation, relay
         # open) now live in the Takeover and are covered by test_takeover.py.
@@ -195,7 +193,6 @@ class TestRunChargeSafety(unittest.TestCase):
         self.assertIn(STATE_ERROR, status.states)
         inst.abort_teardown.assert_called_once()
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
@@ -204,7 +201,7 @@ class TestRunChargeSafety(unittest.TestCase):
     @patch('fla_charge.time')
     def test_trojan_unresponsive_during_absorption_aborts(
         self, mock_time, mock_cache, mock_relay_check, mock_cell_v, mock_ac,
-        mock_lock, mock_unlock,
+        mock_lock,
     ):
         """SmartShunt Trojan returning None during absorption should abort. The
         absorption loop stays in run_charge; only the handoff moved to the Takeover."""
@@ -228,7 +225,6 @@ class TestRunChargeSafety(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
@@ -237,7 +233,7 @@ class TestRunChargeSafety(unittest.TestCase):
     @patch('fla_charge.time')
     def test_relay_closed_externally_during_absorption_aborts(
         self, mock_time, mock_cache, mock_relay_check, mock_cell_v, mock_ac,
-        mock_lock, mock_unlock,
+        mock_lock,
     ):
         """CRITICAL: External relay close during absorption should abort immediately.
         The verify_relay_still_open guard stays in run_charge's absorption loop."""
@@ -258,13 +254,12 @@ class TestRunChargeSafety(unittest.TestCase):
 class TestPhase1Transitions(unittest.TestCase):
     """Test Phase 1 shared charging transition triggers."""
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.time')
     def test_phase1_timeout_returns_false(self, mock_time, mock_cell_v, mock_ac,
-                                          mock_lock, mock_unlock):
+                                          mock_lock):
         """Phase 1 should abort if timeout exceeded."""
         mock_time.time.side_effect = [0, 30000]  # way past 8hr default
         mock_time.sleep = MagicMock()
@@ -281,13 +276,12 @@ class TestPhase1Transitions(unittest.TestCase):
         self.assertNotIn(STATE_STOPPING_DRIVER, status.states)
         self.assertIn(STATE_ERROR, status.states)
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available')
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.time')
     def test_phase1_ac_loss_returns_false(self, mock_time, mock_cell_v, mock_ac,
-                                          mock_lock, mock_unlock):
+                                          mock_lock):
         """AC input lost during Phase 1 should abort with STATE_ERROR."""
         mock_time.time.side_effect = [0, 5]
         mock_time.sleep = MagicMock()
@@ -300,14 +294,12 @@ class TestPhase1Transitions(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn(STATE_ERROR, status.states)
 
-
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.time')
     def test_phase1_discharge_current_does_not_trigger_taper(self, mock_time, mock_cell_v,
-                                                              mock_ac, mock_lock, mock_unlock):
+                                                              mock_ac, mock_lock):
         """Small discharge current should NOT trigger Phase 1 → 2 taper transition."""
         mock_time.time.side_effect = [0, 30000]  # will hit timeout
         mock_time.sleep = MagicMock()
@@ -431,11 +423,10 @@ class TestChargeOperatorAbortRouting(unittest.TestCase):
     @patch('fla_charge.verify_relay_still_open', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.is_ac_available', return_value=True)
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.time')
     def test_operator_abort_in_absorption_reconnects_without_timestamp(
-        self, mock_time, mock_lock, mock_unlock, mock_ac, mock_cell,
+        self, mock_time, mock_lock, mock_ac, mock_cell,
         mock_still, mock_write,
     ):
         mock_time.time.side_effect = [i for i in range(0, 400, 5)]
@@ -480,11 +471,10 @@ class TestChargeRelayStateGuardedFinally(unittest.TestCase):
     @patch('fla_charge.verify_relay_still_open', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.is_ac_available', return_value=True)
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.time')
     def test_mid_charge_error_routes_teardown_through_takeover(
-        self, mock_time, mock_lock, mock_unlock, mock_ac, mock_cell,
+        self, mock_time, mock_lock, mock_ac, mock_cell,
         mock_still, mock_alerting,
     ):
         # Trojan goes unresponsive mid-absorption (hard error) → return False;
@@ -513,14 +503,13 @@ class TestChargeRelayStateGuardedFinally(unittest.TestCase):
         self.assertTrue(mock_alerting.raise_alarm.called)  # loop raised the hard-error alarm
         inst.abort_teardown.assert_called_once()           # finally routed through the Takeover
 
-    @patch('fla_charge.release_lock')
     @patch('fla_charge.acquire_lock', return_value=True)
     @patch('fla_charge.is_ac_available', return_value=True)
     @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
     @patch('fla_charge.update_cache')
     @patch('fla_charge.time')
     def test_hand_off_failure_routes_teardown_through_takeover(
-        self, mock_time, mock_cache, mock_cell, mock_ac, mock_lock, mock_unlock,
+        self, mock_time, mock_cache, mock_cell, mock_ac, mock_lock,
     ):
         # hand_off_in fails before the relay ever opens → return False; the
         # finally still routes teardown through the Takeover.
@@ -585,6 +574,21 @@ class TestChargeResumeOnStartup(unittest.TestCase):
             Service()
         mock_recover.assert_called_once_with(0)
         mock_threading.Thread.assert_called_once()
+        mock_safety.assert_not_called()
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=True)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_relay_open_missing_snapshot_holds_no_worker(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        with patch('fla_charge.Takeover') as MockT:
+            MockT.resume_attach.return_value = None
+            Service()
+        mock_threading.Thread.assert_not_called()
         mock_safety.assert_not_called()
 
     @patch('fla_charge.threading')

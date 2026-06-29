@@ -21,7 +21,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-from temp_battery import TempBatteryService, recover_orphan_temp_battery, is_temp_battery_running
+from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
 from dbus_monitor import DbusMonitor
 from dbus_status_service import (
     StatusService, STATE_IDLE, STATE_STOPPING_DRIVER, STATE_DISCONNECTING,
@@ -31,11 +31,9 @@ from dbus_status_service import (
 from settings import Settings
 import alerting
 from alerting import raise_alarm, clear_alarm
-from relay_control import open_relay, verify_relay_open, verify_relay_still_open, close_relay_verified, close_relay_delta_aware, startup_safety_check, LFP_SAFE_CVL
-from voltage_matching import wait_for_match
-from aggregate_driver import stop as stop_aggregate_driver, start as start_aggregate_driver
+from relay_control import verify_relay_still_open, startup_safety_check
 from temp_compensation import compensate as temp_compensate
-from lock import acquire as acquire_lock, release as release_lock
+from lock import acquire as acquire_lock
 from web_server import (
     start_web_server,
     update_cache,

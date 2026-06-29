@@ -21,15 +21,9 @@ from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
 from dbus_monitor import DbusMonitor
-from temp_battery import TempBatteryService, recover_orphan_temp_battery, is_temp_battery_running
-from relay_control import (
-    open_relay, verify_relay_open, verify_relay_still_open,
-    close_relay_verified, close_relay_delta_aware, startup_safety_check,
-    LFP_SAFE_CVL,
-)
-from voltage_matching import wait_for_match
-from aggregate_driver import stop as stop_aggregate, start as start_aggregate
-from lock import acquire as acquire_lock, release as release_lock
+from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
+from relay_control import verify_relay_still_open, startup_safety_check
+from lock import acquire as acquire_lock
 from temp_compensation import compensate as temp_compensate
 import alerting
 
