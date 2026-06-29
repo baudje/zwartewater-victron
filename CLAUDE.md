@@ -79,9 +79,13 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - `install.sh` — Venus OS installer (daemontools service + rc.local)
 - `service/run` — daemontools runner script
 
-### Duplication Between Services
+### The Takeover module (shared DVCC handoff)
 
-The DVCC handoff sequence (temp battery registration → aggregate stop → systemcalc restart → BMS switch → relay open), the finally/cleanup block, `_check()` + worker thread pattern, `web_server.py` infrastructure, and `settings.py` base methods are duplicated between fla-charge and fla-equalisation. This is intentional — the two services have different state enums, scheduling logic, and charging phases, so the cost of extracting shared abstractions outweighs the benefit for exactly two consumers. **When modifying any of these shared patterns, always apply the same change to both services.**
+The DVCC handoff sequence (temp battery registration → aggregate stop → systemcalc restart → BMS switch → relay open), the reconnect, the relay-state-guarded teardown, and the resume-on-startup path are **extracted into one shared module, `fla-shared/takeover.py`** (the `Takeover` class). Both services construct a `Takeover`, call `hand_off_in()` → run their own charging loop → `hand_back()`, and `t.abort_teardown()` in their `finally`. The Takeover owns the operation lock-release, the aggregate driver, the DVCC selection, the temp battery, and the persisted DVCC-originals snapshot. See `CONTEXT.md` and `docs/adr/0002-service-scaffolding-by-composition.md`. (This reverses the earlier "keep it duplicated" decision: the handoff/teardown sequence was byte-identical and safety-critical, so it now lives in one place and is testable as a sequence.)
+
+### Duplication that remains intentional
+
+The `_check()` + worker-thread pattern, `web_server.py` infrastructure, `settings.py` base methods, the per-service state enums, scheduling logic, charging phases, and HTML genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (Sharing the web/settings/status scaffolding behind a per-service "operation profile" is a documented follow-up — Candidate 3 of the architecture review — not yet done.)
 
 ## Key Design Decisions
 
@@ -102,7 +106,7 @@ The DVCC handoff sequence (temp battery registration → aggregate stop → syst
 - DVCC uses `BmsInstance` (not `BatteryService`) to select which BMS provides CVL/CCL/DCL
 - systemcalc must be restarted after registering temp battery service (doesn't discover services registered after boot)
 - Web dashboards have Abort button (visible during active operations, triggers safe cleanup via finally block)
-- Delta-aware cleanup: `finally` block only closes relay if delta < 1V; otherwise alarms and leaves LFPs on Orion
+- Safe-hold reconnect: the relay is auto-closed ONLY when the Trojan↔LFP delta is within `RELAY_CLOSE_DELTA_MAX` (1V). On any exit with the relay still open, the system never tears down DVCC — it holds the bus on the temp battery and alarms (`Takeover.teardown` / `wait_for_match` safe-hold). There is no "last-resort" high-delta auto-close; the operator restores power or closes relay 2 manually. (Supersedes the earlier delta-aware-`finally` auto-close behaviour.)
 - Temperature compensation adjusts all target voltages per Trojan datasheet (reads from JK BMS sensor)
 - All settings exposed via Venus OS D-Bus settings and web UIs
 

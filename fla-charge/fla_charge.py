@@ -21,14 +21,8 @@ from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
 from dbus_monitor import DbusMonitor
-from temp_battery import TempBatteryService, recover_orphan_temp_battery, is_temp_battery_running
-from relay_control import (
-    open_relay, verify_relay_open, verify_relay_still_open,
-    close_relay_verified, close_relay_delta_aware, startup_safety_check,
-    LFP_SAFE_CVL,
-)
-from voltage_matching import wait_for_match
-from aggregate_driver import stop as stop_aggregate, start as start_aggregate
+from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
+from relay_control import verify_relay_still_open, startup_safety_check
 from lock import acquire as acquire_lock, release as release_lock
 from temp_compensation import compensate as temp_compensate
 import alerting
@@ -48,6 +42,15 @@ from web_server import (
     clear_abort,
     drain_pending_settings,
     _cache,
+)
+from takeover import Takeover, TakeoverStates
+
+CHARGE_TAKEOVER_STATES = TakeoverStates(
+    stopping_driver=STATE_STOPPING_DRIVER,
+    disconnecting=STATE_DISCONNECTING,
+    voltage_matching=STATE_VOLTAGE_MATCHING,
+    reconnecting=STATE_RECONNECTING,
+    restarting_driver=STATE_RESTARTING_DRIVER,
 )
 
 LOG_FILE = "/data/log/fla-charge.log"
@@ -159,17 +162,13 @@ def should_run(settings, monitor):
 
 def run_charge(settings, monitor, status):
     """Execute the full FLA charge sequence. Returns True on success."""
-    temp_service = None
-    aggregate_stopped = False
-    original_dvcc_voltage = None
-    original_battery_service = None
-    original_bms_instance = None
     aborted_by_operator = False
 
     if not acquire_lock("fla-charge"):
         log.info("Operation lock held — skipping")
         return False
 
+    t = Takeover(monitor, status, alerting, "fla-charge", CHARGE_TAKEOVER_STATES)
     try:
         # === PHASE 1: Shared charging ===
         status.update(state=STATE_PHASE1_SHARED)
@@ -237,79 +236,20 @@ def run_charge(settings, monitor, status):
 
             time.sleep(30)
 
-        # === PHASE 2: FLA-only bulk ===
-        # Crash-safe: register at current bus voltage first
-        current_voltage = v_lfp or v_trojan or 28.0
-        temp_service = TempBatteryService(device_instance=100)
-        if not temp_service.register(
-            charge_voltage=current_voltage,
-            charge_current=60.0,  # FLA recommended max bulk current
-            discharge_current=0,
-        ):
+        # === PHASE 2-3: FLA-only bulk/absorption via the Takeover ===
+        # Hand off DVCC to the temp battery and isolate the LFP bank. The safe
+        # voltage is the live bus voltage (crash-safe before the relay opens);
+        # the target is the temp-compensated FLA bulk/absorption voltage.
+        battery_temp = monitor.get_battery_temperature()
+        abs_voltage = temp_compensate(settings.fla_bulk_voltage, battery_temp)
+        if not t.hand_off_in(safe_voltage=(v_lfp or v_trojan or 28.0),
+                             target_voltage=abs_voltage):
             status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to start temp battery service", status_service=status)
-            return False
-
-        status.update(state=STATE_STOPPING_DRIVER)
-        if not stop_aggregate():
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to stop aggregate driver", status_service=status)
-            return False
-        aggregate_stopped = True
-
-        # Switch DVCC to our temp battery service
-        # systemcalc doesn't discover services registered after boot — restart to rescan
-        if not monitor.restart_systemcalc():
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to restart systemcalc for temp battery discovery", status_service=status)
-            return False
-
-        if not monitor.wait_for_service_instance(100):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Temp battery service instance 100 not discovered on D-Bus", status_service=status)
-            return False
-
-        original_battery_service = monitor.get_battery_service_setting()
-        original_bms_instance = monitor.get_bms_instance()
-        log.info("Saving BatteryService=%s, BmsInstance=%s", original_battery_service, original_bms_instance)
-        if not monitor.set_battery_service_setting("com.victronenergy.battery/100"):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to switch BatteryService to temp battery", status_service=status)
-            return False
-        if not monitor.set_bms_instance(100):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to switch BmsInstance to temp battery", status_service=status)
-            return False
-        if not monitor.wait_for_bms_selection("com.victronenergy.battery/100", 100):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("DVCC handoff to temp battery was not confirmed", status_service=status)
-            return False
-
-        status.update(state=STATE_DISCONNECTING)
-        if not open_relay(monitor):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to open relay 2", status_service=status)
-            return False
-
-        if not verify_relay_open(monitor):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("LFP not disconnected after relay open", status_service=status)
             return False
 
         lfp_voltage_at_disconnect = monitor.get_lfp_voltage()
         if lfp_voltage_at_disconnect:
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
-
-        # Raise DVCC system limit and CVL — LFPs are disconnected, safe
-        battery_temp = monitor.get_battery_temperature()
-        abs_voltage = temp_compensate(settings.fla_bulk_voltage, battery_temp)
-        original_dvcc_voltage = monitor.get_dvcc_max_charge_voltage()
-        log.info("Saving DVCC MaxChargeVoltage: %.1fV", original_dvcc_voltage or 0)
-        monitor.set_dvcc_max_charge_voltage(abs_voltage + 0.5)
-        temp_service.set_charge_voltage(abs_voltage)
-        log.info("CVL raised to FLA bulk voltage: %.2fV (base %.2fV, temp %s)",
-                 abs_voltage, settings.fla_bulk_voltage,
-                 "%.1f°C" % battery_temp if battery_temp is not None else "N/A")
 
         # === PHASE 3: FLA absorption ===
         status.update(state=STATE_PHASE2_BULK)
@@ -325,9 +265,6 @@ def run_charge(settings, monitor, status):
             v_trojan = monitor.get_trojan_voltage()
             i_trojan = monitor.get_trojan_current()
             v_lfp = monitor.get_lfp_voltage()
-
-            if v_trojan is not None and i_trojan is not None:
-                temp_service.update_voltage_current(v_trojan, i_trojan)
 
             current_state = STATE_PHASE3_ABSORPTION if elapsed > 300 else STATE_PHASE2_BULK
             delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
@@ -405,13 +342,7 @@ def run_charge(settings, monitor, status):
 
             time.sleep(30)
 
-        # === PHASE 4: Voltage matching + reconnect ===
-        if original_dvcc_voltage is not None:
-            monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
-            log.info("DVCC MaxChargeVoltage restored to %.1fV before matching", original_dvcc_voltage)
-            original_dvcc_voltage = None
-
-        status.update(state=STATE_VOLTAGE_MATCHING)
+        # === PHASE 4: Hand back — float-hold, voltage-match, close, teardown ===
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
             update_cache(state=STATE_VOLTAGE_MATCHING, **kwargs)
@@ -421,43 +352,14 @@ def run_charge(settings, monitor, status):
         # original battery_temp here would compensate the float target against
         # a stale environment, hurting voltage-match convergence.
         float_battery_temp = monitor.get_battery_temperature()
-        matched, delta = wait_for_match(
-            monitor, temp_service, status, alerting,
-            voltage_delta_max=settings.voltage_delta_max,
-            timeout_hours=settings.voltage_match_timeout_hours,
+        matched, delta = t.hand_back(
             float_voltage=temp_compensate(settings.fla_float_voltage, float_battery_temp),
+            voltage_delta_max=settings.voltage_delta_max,
             cache_callback=_vm_cache_cb,
         )
         if not matched:
             status.update(state=STATE_ERROR)
             return False
-
-        status.update(state=STATE_RECONNECTING)
-        if not close_relay_verified(monitor):
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to close relay 2", status_service=status)
-            return False
-
-        # Measure inrush
-        time.sleep(1)
-        inrush = monitor.get_lfp_current()
-        status.update(
-            inrush_current=abs(inrush) if inrush else None,
-            reconnect_delta=delta,
-        )
-        log.info("Reconnect: inrush=%.1fA, delta=%.2fV", abs(inrush) if inrush else 0, delta or 0)
-        time.sleep(2)
-
-        # Cleanup
-        temp_service.deregister()
-        temp_service = None
-
-        status.update(state=STATE_RESTARTING_DRIVER)
-        if not start_aggregate():
-            status.update(state=STATE_ERROR)
-            alerting.raise_alarm("Failed to restart aggregate driver", status_service=status)
-            return False
-        monitor.invalidate_services()
 
         status.update(state=STATE_IDLE, time_remaining=0)
         alerting.clear_alarm(status_service=status)
@@ -475,50 +377,7 @@ def run_charge(settings, monitor, status):
         return False
 
     finally:
-        # Teardown is SAFE ONLY once the relay is confirmed closed — handing back
-        # to DVCC while the LFP is isolated free-falls the bus. Branch on relay
-        # state (belt-and-suspenders; the safe-hold means we normally never reach
-        # here with the relay open).
-        if monitor.get_relay_state() != 1:
-            log.error("CLEANUP: relay open at exit — holding bus, NOT tearing down")
-            alerting.raise_alarm(
-                "Reconnect incomplete — bus held by temp battery, manual intervention required",
-                status_service=status,
-            )
-        else:
-            if original_bms_instance is not None:
-                try:
-                    monitor.set_bms_instance(original_bms_instance)
-                    log.info("BmsInstance restored to %s", original_bms_instance)
-                except Exception:
-                    log.error("CRITICAL: Failed to restore BmsInstance setting")
-
-            if original_battery_service is not None:
-                try:
-                    monitor.set_battery_service_setting(original_battery_service)
-                    log.info("BatteryService restored to %s", original_battery_service)
-                except Exception:
-                    log.error("CRITICAL: Failed to restore BatteryService setting")
-
-            if original_dvcc_voltage is not None:
-                try:
-                    monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
-                    log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
-                except Exception:
-                    log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
-
-            if temp_service is not None:
-                try:
-                    temp_service.deregister()
-                except Exception:
-                    pass
-            close_relay_delta_aware(monitor, alerting, status)
-            if aggregate_stopped:
-                try:
-                    start_aggregate()
-                except Exception:
-                    log.error("CRITICAL: Failed to restart aggregate driver")
-            release_lock()
+        t.abort_teardown()
 
 
 class FlaChargeService:
@@ -542,10 +401,9 @@ class FlaChargeService:
         log.info("FLA charge service started — checking every %ds", CHECK_INTERVAL_SEC)
 
     def _resume_interrupted_reconnect(self):
-        """Adopt and finish a reconnect interrupted mid-hold (see EQ equivalent).
-
-        Returns True if this service took over (or another owns it), so the
-        caller skips startup_safety_check. False when there is nothing to resume."""
+        """Adopt and finish a takeover interrupted mid-hand-back. Returns True if
+        this service took over (or another owns it), so the caller skips the
+        normal startup_safety_check."""
         if self.monitor.get_relay_state() != 0:
             return False
         if not is_temp_battery_running():
@@ -553,54 +411,38 @@ class FlaChargeService:
         if not acquire_lock("fla-charge"):
             log.info("RESUME: another service owns the interrupted reconnect — backing off")
             return True
-        log.warning("RESUME: relay open + temp battery alive — adopting and finishing reconnect")
+        t = Takeover.resume_attach(self.monitor, self.status, alerting,
+                                   "fla-charge", CHARGE_TAKEOVER_STATES)
+        if t is Takeover.RESUME_HELD:
+            # Snapshot missing — resume_attach already alarmed; hold (keep lock).
+            return True
+        if t is None:
+            # The relay closed or the temp battery vanished between our checks and
+            # resume_attach's — nothing to adopt. Release the lock we took and fall
+            # through to the normal startup safety check.
+            release_lock()
+            return False
+        log.warning("RESUME: adopting interrupted takeover and finishing hand-back")
         self._running = True
 
         def _worker():
-            temp_service = TempBatteryService(device_instance=100)
-            temp_service.attach()
             try:
-                self.status.update(state=STATE_VOLTAGE_MATCHING)
                 float_temp = self.monitor.get_battery_temperature()
-                matched, _ = wait_for_match(
-                    self.monitor, temp_service, self.status, alerting,
-                    voltage_delta_max=self.settings.voltage_delta_max,
+                matched, _ = t.hand_back(
                     float_voltage=temp_compensate(self.settings.fla_float_voltage, float_temp),
+                    voltage_delta_max=self.settings.voltage_delta_max,
                 )
-                if not matched:
-                    return
-                self.status.update(state=STATE_RECONNECTING)
-                if not close_relay_verified(self.monitor):
-                    alerting.raise_alarm("RESUME: failed to close relay 2", status_service=self.status)
-                    return
-                time.sleep(2)
+                # teardown no longer clears the alarm; the success path owns it.
+                if matched:
+                    alerting.clear_alarm(status_service=self.status)
+                else:
+                    # Non-exception failure (safe-hold or relay close failed): the
+                    # alarm is already up; reflect the failure in the status display.
+                    self.status.update(state=STATE_ERROR)
             except Exception as e:
                 log.exception("RESUME worker error: %s", e)
+                t.abort_teardown()
             finally:
-                if self.monitor.get_relay_state() == 1:
-                    try:
-                        temp_service.deregister()
-                    except Exception:
-                        pass
-                    try:
-                        self.monitor.set_battery_service_setting("com.victronenergy.battery.aggregate")
-                        self.monitor.set_bms_instance(-1)
-                        self.monitor.set_dvcc_max_charge_voltage(LFP_SAFE_CVL)
-                    except Exception:
-                        log.error("RESUME: failed to restore DVCC to normal")
-                    try:
-                        start_aggregate()
-                        self.monitor.invalidate_services()
-                    except Exception:
-                        log.error("RESUME: failed to restart aggregate driver")
-                    release_lock()
-                    alerting.clear_alarm(status_service=self.status)
-                    log.info("RESUME: reconnect completed, control handed back to aggregate")
-                else:
-                    alerting.raise_alarm(
-                        "RESUME incomplete — bus held by temp battery, manual intervention required",
-                        status_service=self.status,
-                    )
                 self._running = False
 
         threading.Thread(target=_worker, daemon=True).start()

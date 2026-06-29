@@ -21,7 +21,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(__file__), "ext", "velib_python"
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
-from temp_battery import TempBatteryService, recover_orphan_temp_battery, is_temp_battery_running
+from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
 from dbus_monitor import DbusMonitor
 from dbus_status_service import (
     StatusService, STATE_IDLE, STATE_STOPPING_DRIVER, STATE_DISCONNECTING,
@@ -31,9 +31,7 @@ from dbus_status_service import (
 from settings import Settings
 import alerting
 from alerting import raise_alarm, clear_alarm
-from relay_control import open_relay, verify_relay_open, verify_relay_still_open, close_relay_verified, close_relay_delta_aware, startup_safety_check, LFP_SAFE_CVL
-from voltage_matching import wait_for_match
-from aggregate_driver import stop as stop_aggregate_driver, start as start_aggregate_driver
+from relay_control import verify_relay_still_open, startup_safety_check
 from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock
 from web_server import (
@@ -44,6 +42,15 @@ from web_server import (
     clear_abort,
     drain_pending_settings,
     _cache,
+)
+from takeover import Takeover, TakeoverStates
+
+EQ_TAKEOVER_STATES = TakeoverStates(
+    stopping_driver=STATE_STOPPING_DRIVER,
+    disconnecting=STATE_DISCONNECTING,
+    voltage_matching=STATE_VOLTAGE_MATCHING,
+    reconnecting=STATE_RECONNECTING,
+    restarting_driver=STATE_RESTARTING_DRIVER,
 )
 
 # Logging setup
@@ -128,125 +135,47 @@ def run_equalisation(settings, monitor, status):
         log.warning("Operation lock held — skipping equalisation")
         return False
 
-    temp_service = None
-    aggregate_stopped = False
-    original_dvcc_voltage = None
-    original_battery_service = None
-    original_bms_instance = None
     aborted_by_operator = False
-
+    t = Takeover(monitor, status, alerting, "fla-equalisation", EQ_TAKEOVER_STATES)
     try:
-        # Step 1: Register temporary battery service at SAFE voltage first
-        # (not equalisation voltage — protect LFPs if crash before relay opens)
-        temp_service = TempBatteryService(device_instance=100)
-        if not temp_service.register(
-            charge_voltage=28.4,  # Safe LFP voltage — raised to EQ after relay opens
-            charge_current=60.0,  # FLA recommended max bulk current
-            discharge_current=0,
-        ):
+        battery_temp = monitor.get_battery_temperature()
+        eq_voltage = temp_compensate(settings.eq_voltage, battery_temp)
+        if not t.hand_off_in(safe_voltage=28.4, target_voltage=eq_voltage):
             status.update(state=STATE_ERROR)
-            raise_alarm("Failed to start temp battery service", status_service=status)
             return False
 
-        # Step 2: Stop aggregate driver
-        status.update(state=STATE_STOPPING_DRIVER)
-        if not stop_aggregate_driver():
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to stop aggregate driver", status_service=status)
-            return False
-        aggregate_stopped = True
-
-        # Switch DVCC to our temp battery service
-        # systemcalc doesn't discover services registered after boot — restart to rescan
-        if not monitor.restart_systemcalc():
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to restart systemcalc for temp battery discovery", status_service=status)
-            return False
-
-        if not monitor.wait_for_service_instance(100):
-            status.update(state=STATE_ERROR)
-            raise_alarm("Temp battery service instance 100 not discovered on D-Bus", status_service=status)
-            return False
-
-        original_battery_service = monitor.get_battery_service_setting()
-        original_bms_instance = monitor.get_bms_instance()
-        log.info("Saving BatteryService=%s, BmsInstance=%s", original_battery_service, original_bms_instance)
-        if not monitor.set_battery_service_setting("com.victronenergy.battery/100"):
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to switch BatteryService to temp battery", status_service=status)
-            return False
-        if not monitor.set_bms_instance(100):
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to switch BmsInstance to temp battery", status_service=status)
-            return False
-        if not monitor.wait_for_bms_selection("com.victronenergy.battery/100", 100):
-            status.update(state=STATE_ERROR)
-            raise_alarm("DVCC handoff to temp battery was not confirmed", status_service=status)
-            return False
-
-        # Step 3: Open relay 2 (disconnect LFP direct path)
-        status.update(state=STATE_DISCONNECTING)
-        if not open_relay(monitor):
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to open relay 2", status_service=status)
-            return False
-        if not verify_relay_open(monitor):
-            status.update(state=STATE_ERROR)
-            raise_alarm("LFP not disconnected after relay open", status_service=status)
-            return False
-
-        # Record LFP voltage at disconnect for Orion failure detection (CRIT-3)
         lfp_voltage_at_disconnect = monitor.get_lfp_voltage()
         if lfp_voltage_at_disconnect is not None:
             log.info("LFP voltage at disconnect: %.2fV", lfp_voltage_at_disconnect)
 
-        # Step 5: Raise DVCC system limit and CVL — LFPs are disconnected, safe
-        battery_temp = monitor.get_battery_temperature()
-        eq_voltage = temp_compensate(settings.eq_voltage, battery_temp)
-        original_dvcc_voltage = monitor.get_dvcc_max_charge_voltage()
-        log.info("Saving DVCC MaxChargeVoltage: %.1fV", original_dvcc_voltage or 0)
-        monitor.set_dvcc_max_charge_voltage(eq_voltage + 0.5)  # Headroom above target
-        temp_service.set_charge_voltage(eq_voltage)
-        log.info("CVL raised to equalisation voltage: %.1fV (base %.1fV, temp %s)",
-                 eq_voltage, settings.eq_voltage,
-                 "%.1f°C" % battery_temp if battery_temp is not None else "N/A")
-
-        # Step 6: Equalisation — monitor Trojan current
+        # Step: Equalisation loop (service-specific — stays here)
         status.update(state=STATE_EQUALISING)
         log.info("Starting equalisation at %.1fV", settings.eq_voltage)
         eq_start = time.time()
         eq_timeout = settings.eq_timeout_hours * 3600
-        i_trojan_none_count = 0  # IMP-4: track consecutive None readings
+        i_trojan_none_count = 0
 
         while True:
             elapsed = time.time() - eq_start
-
             v_trojan = monitor.get_trojan_voltage()
             i_trojan = monitor.get_trojan_current()
-            if v_trojan is not None and i_trojan is not None:
-                temp_service.update_voltage_current(v_trojan, i_trojan)
-
             v_lfp = monitor.get_lfp_voltage()
             remaining = max(0, eq_timeout - elapsed)
             delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
             status.update(time_remaining=remaining, trojan_v=v_trojan, lfp_v=v_lfp)
-            update_cache(
-                state=STATE_EQUALISING, time_remaining=remaining,
-                trojan_v=v_trojan, lfp_v=v_lfp, voltage_delta=delta,
-            )
+            update_cache(state=STATE_EQUALISING, time_remaining=remaining,
+                         trojan_v=v_trojan, lfp_v=v_lfp, voltage_delta=delta)
 
             if v_trojan is None:
                 status.update(state=STATE_ERROR)
                 raise_alarm("SmartShunt Trojan (279) unresponsive during equalisation", status_service=status)
                 return False
 
-            # Verify relay still open — external close at compensated CVL would damage LFPs
             if not verify_relay_still_open(monitor, eq_voltage):
                 status.update(state=STATE_ERROR)
                 raise_alarm("Relay closed externally during EQ — aborting", status_service=status)
                 return False
 
-            # CRIT-3: Detect Orion failure — LFP voltage dropping
             if (lfp_voltage_at_disconnect is not None and v_lfp is not None
                     and v_lfp < lfp_voltage_at_disconnect - 0.5):
                 log.warning("LFP voltage dropping (%.2fV -> %.2fV) — possible Orion failure",
@@ -255,7 +184,6 @@ def run_equalisation(settings, monitor, status):
                 raise_alarm("LFP voltage dropping — Orion may have failed", status_service=status)
                 return False
 
-            # IMP-4: Handle i_trojan=None with a counter
             if i_trojan is None:
                 i_trojan_none_count += 1
                 if i_trojan_none_count >= 10:
@@ -264,29 +192,21 @@ def run_equalisation(settings, monitor, status):
             else:
                 i_trojan_none_count = 0
 
-            # IMP-6: Warn on high Trojan charge current
             if i_trojan is not None and abs(i_trojan) > 60:
                 log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", abs(i_trojan))
 
-            # Only check current completion AFTER voltage reaches the target
-            # Use compensated voltage minus 0.1V margin for wiring losses
             voltage_reached = v_trojan is not None and v_trojan >= (eq_voltage - 0.1)
             if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.eq_current_complete:
-                log.info(
-                    "Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA threshold (%.0f min)",
-                    v_trojan, eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60,
-                )
+                log.info("Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
+                         v_trojan, eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60)
                 break
 
             if elapsed > eq_timeout:
                 log.warning("Equalisation timeout after %.0f min, current %.1fA",
-                    elapsed / 60, abs(i_trojan) if i_trojan else 0)
+                            elapsed / 60, abs(i_trojan) if i_trojan else 0)
                 break
 
             if check_abort():
-                # Relay is open here (LFP isolated). A hard-stop would tear down
-                # the temp battery and free-fall the bus, so instead break into
-                # the controlled reconnect and flag the run as a non-completion.
                 log.warning("Operator abort during equalisation — proceeding to controlled reconnect")
                 clear_abort()
                 aborted_by_operator = True
@@ -294,72 +214,24 @@ def run_equalisation(settings, monitor, status):
 
             if int(elapsed) % 300 < 30:
                 log.info("Equalising: %.0f min, V=%.1fV, I=%.1fA",
-                    elapsed / 60, v_trojan or 0, i_trojan or 0)
+                         elapsed / 60, v_trojan or 0, i_trojan or 0)
 
             time.sleep(30)
 
-        # Step 6: Reduce CVL to float + voltage matching
-        if original_dvcc_voltage is not None:
-            monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
-            log.info("DVCC MaxChargeVoltage restored to %.1fV before matching", original_dvcc_voltage)
-            original_dvcc_voltage = None
-
-        status.update(state=STATE_VOLTAGE_MATCHING)
+        # Hand back: float-hold, close, guarded teardown.
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
             update_cache(state=STATE_VOLTAGE_MATCHING, **kwargs)
-
-        # Re-read battery temperature: the eq run may have lasted hours and
-        # engine-room temperature can swing 10°C+ over that window. Using the
-        # original battery_temp here would compensate the float target against
-        # a stale environment, hurting voltage-match convergence.
         float_battery_temp = monitor.get_battery_temperature()
-        matched, delta = wait_for_match(
-            monitor, temp_service, status, alerting,
-            voltage_delta_max=settings.voltage_delta_max,
-            timeout_hours=settings.voltage_match_timeout_hours,
+        matched, delta = t.hand_back(
             float_voltage=temp_compensate(settings.float_voltage, float_battery_temp),
+            voltage_delta_max=settings.voltage_delta_max,
             cache_callback=_vm_cache_cb,
         )
         if not matched:
             status.update(state=STATE_ERROR)
             return False
 
-        # Step 8: Close relay 2
-        status.update(state=STATE_RECONNECTING)
-        if not close_relay_verified(monitor):
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to close relay 2", status_service=status)
-            return False
-
-        # New feature: Register inrush current on reconnect
-        time.sleep(1)
-        inrush = monitor.get_lfp_current()
-        v_t_reconnect = monitor.get_trojan_voltage()
-        v_l_reconnect = monitor.get_lfp_voltage()
-        reconnect_delta = abs(v_t_reconnect - v_l_reconnect) if (v_t_reconnect and v_l_reconnect) else None
-        log.info("Reconnect: inrush=%.1fA, delta=%.2fV",
-                 abs(inrush) if inrush else 0, reconnect_delta or 0)
-        status.update(
-            inrush_current=abs(inrush) if inrush else None,
-            reconnect_delta=reconnect_delta,
-        )
-        time.sleep(2)
-
-        # Step 9: Deregister temp service
-        temp_service.deregister()
-        temp_service = None
-
-        # Step 10: Restart aggregate driver
-        status.update(state=STATE_RESTARTING_DRIVER)
-        if not start_aggregate_driver():
-            status.update(state=STATE_ERROR)
-            raise_alarm("Failed to restart aggregate driver", status_service=status)
-            return False
-        monitor.invalidate_services()
-
-        # Step 11: Record outcome. An operator-aborted run reconnects safely but
-        # is NOT a completion — do not advance the equalisation interval.
         status.update(state=STATE_IDLE, time_remaining=0)
         clear_alarm(status_service=status)
         if aborted_by_operator:
@@ -376,58 +248,7 @@ def run_equalisation(settings, monitor, status):
         return False
 
     finally:
-        # Teardown (handing control back to DVCC/aggregate) is SAFE ONLY once
-        # the relay is confirmed closed. With the relay open the LFP is still
-        # isolated and the temp battery is holding the bus — deregistering it or
-        # restoring DVCC now is exactly the free-fall cascade. So branch on relay
-        # state. In normal operation the safe-hold means we never reach here with
-        # the relay open; this is the belt-and-suspenders for any unexpected exit.
-        if monitor.get_relay_state() != 1:
-            log.error("CLEANUP: relay open at exit — holding bus, NOT tearing down "
-                      "(temp battery left registered, lock held, aggregate stopped)")
-            raise_alarm(
-                "Reconnect incomplete — bus held by temp battery, manual intervention required",
-                status_service=status,
-            )
-        else:
-            # Relay confirmed closed — restore DVCC and hand back to the aggregate.
-            if original_bms_instance is not None:
-                try:
-                    monitor.set_bms_instance(original_bms_instance)
-                    log.info("BmsInstance restored to %s", original_bms_instance)
-                except Exception:
-                    log.error("CRITICAL: Failed to restore BmsInstance setting")
-
-            if original_battery_service is not None:
-                try:
-                    monitor.set_battery_service_setting(original_battery_service)
-                    log.info("BatteryService restored to %s", original_battery_service)
-                except Exception:
-                    log.error("CRITICAL: Failed to restore BatteryService setting")
-
-            if original_dvcc_voltage is not None:
-                try:
-                    monitor.set_dvcc_max_charge_voltage(original_dvcc_voltage)
-                    log.info("DVCC MaxChargeVoltage restored to %.1fV", original_dvcc_voltage)
-                except Exception:
-                    log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
-
-            if temp_service is not None:
-                try:
-                    temp_service.deregister()
-                except Exception:
-                    pass
-
-            # No-op when the relay is already closed; harmless belt-and-suspenders.
-            close_relay_delta_aware(monitor, alerting, status)
-
-            if aggregate_stopped:
-                try:
-                    start_aggregate_driver()
-                except Exception:
-                    log.error("CRITICAL: Failed to restart aggregate driver in cleanup")
-
-            release_lock()
+        t.abort_teardown()
 
 
 class FlaEqualisationService:
@@ -456,68 +277,48 @@ class FlaEqualisationService:
         log.info("FLA equalisation service started — checking every %ds", CHECK_INTERVAL_SEC)
 
     def _resume_interrupted_reconnect(self):
-        """Adopt and finish a reconnect interrupted mid-hold.
-
-        Returns True if this service took over (or another service owns it), so
-        the caller skips the normal startup_safety_check. Returns False when
-        there is nothing to resume (relay closed, or no holder subprocess)."""
+        """Adopt and finish a takeover interrupted mid-hand-back. Returns True if
+        this service took over (or another owns it), so the caller skips the
+        normal startup_safety_check."""
         if self.monitor.get_relay_state() != 0:
-            return False  # relay closed — nothing is isolated
+            return False
         if not is_temp_battery_running():
-            return False  # relay open but no holder — let startup_safety_check handle it
+            return False
         if not acquire_lock("fla-equalisation"):
             log.info("RESUME: another service owns the interrupted reconnect — backing off")
-            return True   # the other service handles it; skip our safety check
-        log.warning("RESUME: relay open + temp battery alive — adopting and finishing reconnect")
+            return True
+        t = Takeover.resume_attach(self.monitor, self.status, alerting,
+                                   "fla-equalisation", EQ_TAKEOVER_STATES)
+        if t is Takeover.RESUME_HELD:
+            # Snapshot missing — resume_attach already alarmed; hold (keep lock).
+            return True
+        if t is None:
+            # The relay closed or the temp battery vanished between our checks and
+            # resume_attach's — nothing to adopt. Release the lock we took and fall
+            # through to the normal startup safety check.
+            release_lock()
+            return False
+        log.warning("RESUME: adopting interrupted takeover and finishing hand-back")
         self._running = True
 
         def _worker():
-            temp_service = TempBatteryService(device_instance=100)
-            temp_service.attach()
             try:
-                self.status.update(state=STATE_VOLTAGE_MATCHING)
                 float_temp = self.monitor.get_battery_temperature()
-                matched, _ = wait_for_match(
-                    self.monitor, temp_service, self.status, alerting,
-                    voltage_delta_max=self.settings.voltage_delta_max,
+                matched, _ = t.hand_back(
                     float_voltage=temp_compensate(self.settings.float_voltage, float_temp),
+                    voltage_delta_max=self.settings.voltage_delta_max,
                 )
-                if not matched:
-                    return  # safe-hold never returns in production; guard anyway
-                self.status.update(state=STATE_RECONNECTING)
-                if not close_relay_verified(self.monitor):
-                    raise_alarm("RESUME: failed to close relay 2", status_service=self.status)
-                    return
-                time.sleep(2)
+                # teardown no longer clears the alarm; the success path owns it.
+                if matched:
+                    clear_alarm(status_service=self.status)
+                else:
+                    # Non-exception failure (safe-hold or relay close failed): the
+                    # alarm is already up; reflect the failure in the status display.
+                    self.status.update(state=STATE_ERROR)
             except Exception as e:
                 log.exception("RESUME worker error: %s", e)
+                t.abort_teardown()
             finally:
-                # Mirror the relay-state-guarded teardown. The interrupted run's
-                # saved DVCC originals are lost, so restore to known-safe normals.
-                if self.monitor.get_relay_state() == 1:
-                    try:
-                        temp_service.deregister()
-                    except Exception:
-                        pass
-                    try:
-                        self.monitor.set_battery_service_setting("com.victronenergy.battery.aggregate")
-                        self.monitor.set_bms_instance(-1)
-                        self.monitor.set_dvcc_max_charge_voltage(LFP_SAFE_CVL)
-                    except Exception:
-                        log.error("RESUME: failed to restore DVCC to normal")
-                    try:
-                        start_aggregate_driver()
-                        self.monitor.invalidate_services()
-                    except Exception:
-                        log.error("RESUME: failed to restart aggregate driver")
-                    release_lock()
-                    alerting.clear_alarm(status_service=self.status)
-                    log.info("RESUME: reconnect completed, control handed back to aggregate")
-                else:
-                    raise_alarm(
-                        "RESUME incomplete — bus held by temp battery, manual intervention required",
-                        status_service=self.status,
-                    )
                 self._running = False
 
         threading.Thread(target=_worker, daemon=True).start()
