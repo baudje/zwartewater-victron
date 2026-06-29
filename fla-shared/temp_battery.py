@@ -40,7 +40,9 @@ def recover_orphan_temp_battery(relay_state=None):
     Relay-aware. When relay 2 is OPEN (relay_state == 0) the temp battery is
     holding the isolated main bus — killing it is the free-fall cascade, so we
     NEVER kill in that case; the resume path adopts it instead. We only treat a
-    stray temp battery as a true orphan when the relay is closed (or unknown).
+    stray temp battery as a true orphan when relay 2 is confirmed closed — an
+    unreadable relay state (None) is likewise left alone, since we cannot rule
+    out a live hold.
 
     The temp battery subprocess registers com.victronenergy.battery.fla_temp.
     If it outlives its operation — e.g. dbus-daemon is restarted mid-handoff by
