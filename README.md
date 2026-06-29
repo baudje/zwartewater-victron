@@ -36,7 +36,9 @@ The parallel setup works well for daily cycling, but FLA batteries periodically 
 
 ![Charge sequences](docs/charge-sequences.png)
 
-The solution is temporary physical isolation: a relay disconnects the LFPs from the DC bus during high-voltage FLA charging, while an Orion DC-DC charger independently maintains the LFPs at a safe voltage. After the FLA charge completes, the system waits for the voltages to converge (delta <= 1V) before reconnecting. This repo automates the entire sequence — scheduling, relay control, voltage management, convergence monitoring, and reconnection — with layered safety guards to protect against every failure mode identified during development.
+The solution is temporary physical isolation: a relay disconnects the LFPs from the DC bus during high-voltage FLA charging, while an Orion DC-DC charger independently maintains the LFPs at a safe voltage. After the FLA charge completes, the system waits for the voltages to converge (delta <= 1V) before reconnecting. This repo automates the entire sequence — scheduling, DVCC handoff, relay control, voltage management, convergence monitoring, and safe-hold reconnection — with layered safety guards to protect against every failure mode identified during development.
+
+While the LFP bank is isolated, control of the main DC bus is transferred from the aggregate-battery driver to a temporary D-Bus battery service (the **Takeover** — see `fla-shared/takeover.py`). The Takeover owns one operation's full lifecycle: it snapshots and persists the real pre-operation DVCC settings, points DVCC at the temp battery, opens the relay, and on completion restores everything in order and hands control back. If a run is interrupted (crash or reboot) with the relay still open, the next service start adopts the in-flight Takeover and finishes the reconnect instead of restarting from scratch.
 
 ## System Overview
 
@@ -114,7 +116,8 @@ Common code shared between both services:
 
 | Module | Purpose |
 |--------|---------|
-| `relay_control.py` | Relay open/close with verification, delta-aware cleanup, startup recovery |
+| `takeover.py` | DVCC handoff orchestrator — owns one operation's temp-battery, aggregate-driver, DVCC-selection and lock lifecycle; persists DVCC originals; relay-state-guarded teardown; resume-on-startup |
+| `relay_control.py` | Relay open/close with read-back verification, safe-hold cleanup, startup recovery |
 | `voltage_matching.py` | Convergence loop — waits for delta <= 1V before reconnect |
 | `temp_battery.py` | Subprocess manager for temporary D-Bus battery service |
 | `temp_battery_process.py` | Standalone D-Bus battery service (runs as subprocess) |
@@ -248,8 +251,9 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 |-------|---------|--------|
 | **Crash-safe CVL** | Service crash before relay opens | Temp service at 28.4V (safe for LFPs), not 31.5V. CCL = 60A |
 | **Relay re-verification** | Every 30s during high-voltage phases | Uses temp-compensated CVL; aborts if relay found closed while CVL > 28.4V |
-| **Delta-aware relay** | `finally` block on any abort | Closes if delta <= 1V + read-back verified; alarm if > 1V, unreadable, or read-back fails |
-| **Startup recovery** | Service restart with relay open | Closes + read-back if delta <= 1V; alarm if > 1V or unreadable |
+| **Safe-hold reconnect** | Any exit with the relay still open | Relay closes only when delta <= 1V and read-back verified; otherwise the bus is held on the temp battery and an alarm is raised. No high-delta auto-close, and DVCC is never torn down while the LFP is isolated |
+| **DVCC originals snapshot** | Every operation | Real pre-operation DVCC settings (BatteryService / BmsInstance / MaxChargeVoltage) snapshotted and persisted before handoff, then restored on completion or resume — never hardcoded defaults |
+| **Resume on startup** | Service restart mid-reconnect (relay open + temp battery alive) | Adopts the in-flight Takeover and finishes the hand-back, restoring DVCC from the persisted snapshot; if the snapshot is lost, holds and alarms rather than guessing |
 | **Relay verification** | After every relay command | Reads back state; aborts if mismatch. Unreadable LFP current after open also aborts |
 | **Orion failure detection** | LFP voltage drops > 0.5V during EQ/charge | Aborts and reconnects |
 | **Temperature compensation** | Every charge cycle | Adjusts voltages per Trojan datasheet (±0.06V/°C from 25°C) |
@@ -264,16 +268,16 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 ## Testing
 
 ```bash
-# Run all tests (184 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 96 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 51 tests — EQ service
+# Run all tests (232 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 141 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 54 tests — EQ service
 python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-184 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging.
+232 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract, and the Takeover handoff/teardown/resume sequence), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
 
 ## Files
 
@@ -281,13 +285,16 @@ python3 -m unittest fla-shared/tests/test_relay_control.py -v
 zwartewater-victron/
 +-- README.md
 +-- CLAUDE.md
++-- CONTEXT.md                       # Domain glossary (Takeover, safe-hold, etc.)
 +-- config/
 |   +-- config.ini                  # Aggregate battery config
 |   +-- sb-config.ini               # Serial battery config
 +-- docs/
 |   +-- design.md                   # Design specification
 |   +-- state-machine.md            # Integrated state machine documentation
+|   +-- adr/                        # Architecture decision records
 +-- fla-shared/
+|   +-- takeover.py                 # DVCC handoff/teardown/resume orchestrator
 |   +-- relay_control.py            # Relay control with safety verification
 |   +-- voltage_matching.py         # Convergence loop for reconnection
 |   +-- temp_battery.py             # Temp battery subprocess manager
@@ -297,7 +304,7 @@ zwartewater-victron/
 |   +-- alerting.py                 # Buzzer + alarm
 |   +-- lock.py                     # Atomic file-based operation lock
 |   +-- aggregate_driver.py         # Start/stop aggregate batteries
-|   +-- tests/                      # 96 unit tests for shared modules
+|   +-- tests/                      # 141 unit tests for shared modules
 +-- fla-equalisation/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
@@ -306,7 +313,7 @@ zwartewater-victron/
 |   +-- settings.py                 # Venus OS settings integration
 |   +-- web_server.py               # Web dashboard (port 8088)
 |   +-- service/run                 # Daemontools service runner
-|   +-- tests/                      # 51 unit tests
+|   +-- tests/                      # 54 unit tests
 +-- fla-charge/
     +-- install.sh                  # Venus OS installer
     +-- fla_charge.py               # Main charge service
@@ -321,6 +328,8 @@ zwartewater-victron/
 
 - Design spec: `docs/design.md`
 - State machine: `docs/state-machine.md`
+- Domain glossary: `CONTEXT.md`
+- Architecture decisions: `docs/adr/` (ADR-0001 persisted DVCC originals, ADR-0002 service scaffolding by composition)
 - Trojan L16H-AC datasheet: `L16HAC_Trojan_Data_Sheets.pdf`
 - EVE MB31 datasheet: PBRI-MB31-D06-01 (Nov 2023)
 - Electrical schema: ScheepsArts, Zwartewater 20250526.pdf
