@@ -289,6 +289,46 @@ class TestSafetyGuards(unittest.TestCase):
         mock_open.assert_not_called()
 
 
+class TestOperatorAbortRouting(unittest.TestCase):
+    """Operator Abort in the relay-open equalising loop reconnects cleanly."""
+
+    def _make_mocks(self, **kw):
+        settings = MockSettings(**kw)
+        monitor = MockMonitor(trojan_voltage=27.2, lfp_voltage=27.0, relay_state=0)
+        status = MockStatus()
+        return settings, monitor, status
+
+    @patch('fla_equalisation.write_last_equalisation')
+    @patch('fla_equalisation.wait_for_match', return_value=(True, 0.2))
+    @patch('fla_equalisation.close_relay_verified', return_value=True)
+    @patch('fla_equalisation.start_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.stop_aggregate_driver', return_value=True)
+    @patch('fla_equalisation.verify_relay_open', return_value=True)
+    @patch('fla_equalisation.open_relay', return_value=True)
+    @patch('fla_equalisation.release_lock')
+    @patch('fla_equalisation.acquire_lock', return_value=True)
+    @patch('fla_equalisation.check_abort', return_value=True)
+    @patch('fla_equalisation.time')
+    def test_operator_abort_reconnects_without_timestamp(
+        self, mock_time, mock_abort, mock_lock, mock_unlock, mock_open, mock_verify,
+        mock_stop, mock_start, mock_close, mock_match, mock_write,
+    ):
+        mock_time.time.side_effect = [i for i in range(0, 200, 5)]
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks()
+        with patch('fla_equalisation.TempBatteryService') as MockTBS:
+            MockTBS.return_value = MagicMock()
+            with patch('fla_equalisation.update_cache'):
+                result = run_equalisation(settings, monitor, status)
+
+        # Reconnect happened…
+        mock_match.assert_called_once()
+        mock_close.assert_called_once()
+        # …but the run is flagged non-completion: no timestamp, returns False.
+        mock_write.assert_not_called()
+        self.assertFalse(result)
+
+
 class TestFinallySafety(unittest.TestCase):
     """Test the finally block's delta-aware relay handling."""
 

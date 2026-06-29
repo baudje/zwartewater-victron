@@ -133,6 +133,7 @@ def run_equalisation(settings, monitor, status):
     original_dvcc_voltage = None
     original_battery_service = None
     original_bms_instance = None
+    aborted_by_operator = False
 
     try:
         # Step 1: Register temporary battery service at SAFE voltage first
@@ -283,11 +284,13 @@ def run_equalisation(settings, monitor, status):
                 break
 
             if check_abort():
-                log.warning("Abort requested via web UI")
+                # Relay is open here (LFP isolated). A hard-stop would tear down
+                # the temp battery and free-fall the bus, so instead break into
+                # the controlled reconnect and flag the run as a non-completion.
+                log.warning("Operator abort during equalisation — proceeding to controlled reconnect")
                 clear_abort()
-                status.update(state=STATE_ERROR)
-                raise_alarm("Equalisation aborted by operator", status_service=status)
-                return False
+                aborted_by_operator = True
+                break
 
             if int(elapsed) % 300 < 30:
                 log.info("Equalising: %.0f min, V=%.1fV, I=%.1fA",
@@ -355,11 +358,15 @@ def run_equalisation(settings, monitor, status):
             return False
         monitor.invalidate_services()
 
-        # Step 11: Record success
-        write_last_equalisation()
+        # Step 11: Record outcome. An operator-aborted run reconnects safely but
+        # is NOT a completion — do not advance the equalisation interval.
         status.update(state=STATE_IDLE, time_remaining=0)
-        log.info("Equalisation completed successfully")
         clear_alarm(status_service=status)
+        if aborted_by_operator:
+            log.info("Operator-aborted equalisation reconnected safely — interval not advanced")
+            return False
+        write_last_equalisation()
+        log.info("Equalisation completed successfully")
         return True
 
     except Exception as e:
