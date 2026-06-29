@@ -229,6 +229,36 @@ class Takeover:
         delete_originals()
         self._torn_down = True
 
+    def hand_back(self, float_voltage, voltage_delta_max, cache_callback=None):
+        """Hold the bus at float until the Trojan<->LFP delta converges, close
+        relay 2, then run the guarded teardown. Returns (matched, delta). The
+        ceiling is restored from the snapshot first (relay still open — safe,
+        it is only a ceiling, the temp battery CVL at float caps the bus). In
+        production wait_for_match only returns on convergence (else safe-hold)."""
+        originals = self._originals or load_originals()
+        if originals is not None:
+            self.monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
+            log.info("DVCC MaxChargeVoltage restored to %s before matching",
+                     originals["max_charge_voltage"])
+
+        self.status.update(state=self.states.voltage_matching)
+        matched, delta = voltage_matching.wait_for_match(
+            self.monitor, self.temp_service, self.status, self.alerting,
+            voltage_delta_max=voltage_delta_max, float_voltage=float_voltage,
+            cache_callback=cache_callback,
+        )
+        if not matched:
+            return False, delta
+
+        self.status.update(state=self.states.reconnecting)
+        if not relay_control.close_relay_verified(self.monitor):
+            self.alerting.raise_alarm("Failed to close relay 2", status_service=self.status)
+            return False, delta
+
+        self.status.update(state=self.states.restarting_driver)
+        self.teardown()
+        return True, delta
+
     def abort_teardown(self):
         """Alias for service finally blocks — the guarded teardown belt-and-suspenders."""
         self.teardown()

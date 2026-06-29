@@ -257,5 +257,63 @@ class TestTeardown(unittest.TestCase):
         magg.start.assert_called_once()
 
 
+class TestHandBack(unittest.TestCase):
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_hb.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
+
+    def _make(self, monitor):
+        t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
+        t.temp_service = MagicMock()
+        t._aggregate_stopped = True
+        t._originals = {"battery_service": "com.victronenergy.battery/277",
+                        "bms_instance": -1, "max_charge_voltage": 32.0}
+        return t
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.relay_control')
+    @patch('takeover.voltage_matching')
+    def test_converged_closes_and_tears_down(self, mvm, mrelay, mrelease, magg):
+        mvm.wait_for_match.return_value = (True, 0.2)
+        mrelay.close_relay_verified.return_value = True
+        monitor = MockMonitor(relay_state=1)  # close_relay flips MockMonitor to 1 anyway
+        t = self._make(monitor)
+        matched, delta = t.hand_back(float_voltage=27.0, voltage_delta_max=1.0)
+        self.assertTrue(matched)
+        mrelay.close_relay_verified.assert_called_once()
+        mrelease.assert_called_once()  # teardown ran (relay closed)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.relay_control')
+    @patch('takeover.voltage_matching')
+    def test_restores_ceiling_from_snapshot_before_matching(self, mvm, mrelay, mrelease, magg):
+        mvm.wait_for_match.return_value = (True, 0.2)
+        mrelay.close_relay_verified.return_value = True
+        monitor = MockMonitor(relay_state=1)
+        recorded = []
+        monitor.set_dvcc_max_charge_voltage = MagicMock(side_effect=lambda v: recorded.append(v) or True)
+        t = self._make(monitor)
+        t.hand_back(float_voltage=27.0, voltage_delta_max=1.0)
+        self.assertIn(32.0, recorded)  # ceiling restored to the snapshot value
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.relay_control')
+    @patch('takeover.voltage_matching')
+    def test_not_matched_does_not_close_or_teardown(self, mvm, mrelay, mrelease, magg):
+        mvm.wait_for_match.return_value = (False, 2.0)  # bounded non-convergence (test only)
+        monitor = MockMonitor(relay_state=0)
+        t = self._make(monitor)
+        matched, delta = t.hand_back(float_voltage=27.0, voltage_delta_max=1.0)
+        self.assertFalse(matched)
+        mrelay.close_relay_verified.assert_not_called()
+        mrelease.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
