@@ -19,6 +19,13 @@ driver cannot see.
   Checking for behaviour rather than a marker comment means the script stays
   green if upstream merges our PRs and the same identifiers arrive via a
   fresh download. See "Catching upstream overwrites" below.
+- `README.md.upstream.orig` / `README.md.upstream` / `README.md.patch` —
+  documentation patch for the upstream `README.md`, intended to be attached
+  to PR #154. Adds a "Smart Shunts as battery current source" subsection
+  documenting `SMARTSHUNT_AS_BATTERY_CURRENT` and softens the "Smart Shunts
+  as battery current monitor are neither supported nor needed" line under
+  "Function". Apply with `patch -p1 < README.md.patch` from a clone of
+  upstream `dbus-aggregate-batteries`.
 
 ## What the patches change
 
