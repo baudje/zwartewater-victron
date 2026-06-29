@@ -50,9 +50,15 @@ def recover_orphan_temp_battery(relay_state=None):
     only one operation runs at a time, so a temp_battery_process.py running with
     no lock held (and the relay closed) is definitively an orphan. Call at
     service startup. Returns True if an orphan was found and killed."""
-    if relay_state == 0:
-        log.info("Relay open at startup — temp battery is a live hold, not an orphan; "
-                 "deferring to the resume path")
+    if relay_state != 1:
+        # Only reclaim a stray temp battery when relay 2 is CONFIRMED closed.
+        # Relay open (0) → it is a live hold; killing it free-falls the bus.
+        # Relay unknown (None — e.g. D-Bus not yet readable at startup) → we
+        # cannot rule out a live hold, so we likewise refuse to kill. A genuine
+        # half-dead orphan always has the relay closed, so it is still cleared on
+        # any startup where the relay reads cleanly.
+        log.info("Relay not confirmed closed (state=%s) at startup — not reclaiming "
+                 "temp battery; deferring to the resume path", relay_state)
         return False
     if lock.is_locked():
         return False  # A real operation owns the temp battery — leave it alone

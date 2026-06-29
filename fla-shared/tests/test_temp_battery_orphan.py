@@ -47,14 +47,19 @@ class TestRecoverOrphanTempBattery(unittest.TestCase):
         self.assertTrue(matcher.startswith("python3 "))
         self.assertIn("temp_battery_process.py", matcher)
 
-    def test_default_relay_state_none_behaves_as_closed(self, mock_lock, mock_subproc):
-        # Back-compat: a caller that passes no relay_state still gets orphan kill.
+    def test_default_relay_state_none_does_not_kill(self, mock_lock, mock_subproc):
+        # Relay state unknown (no arg → None) → cannot confirm relay closed.
+        # Must NOT kill — same guard as relay open. It's the relay guard (not the
+        # lock) that fires here, so we set is_locked=False to prove it.
         mock_lock.is_locked.return_value = False
-        mock_subproc.run.side_effect = [
-            MagicMock(returncode=0, stdout=b"7487\n"),
-            MagicMock(returncode=0, stdout=b""),
-        ]
-        self.assertTrue(temp_battery.recover_orphan_temp_battery())
+        self.assertFalse(temp_battery.recover_orphan_temp_battery())
+        mock_subproc.run.assert_not_called()
+
+    def test_relay_none_never_kills(self, mock_lock, mock_subproc):
+        # Explicit relay_state=None also must not probe or kill.
+        mock_lock.is_locked.return_value = False
+        self.assertFalse(temp_battery.recover_orphan_temp_battery(relay_state=None))
+        mock_subproc.run.assert_not_called()
 
 
 @patch('temp_battery.subprocess')
