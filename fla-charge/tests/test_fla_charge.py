@@ -708,5 +708,66 @@ class TestChargeRelayStateGuardedFinally(unittest.TestCase):
         mock_start.assert_not_called()
 
 
+class TestChargeResumeOnStartup(unittest.TestCase):
+    """Startup adopts an interrupted hold instead of killing it."""
+
+    def _service(self, monitor):
+        """Build a FlaChargeService with construction side-effects stubbed.
+
+        Uses start()/addCleanup(stop) rather than a with-block so patches remain
+        active when Service() is called from the test method body (returning from
+        inside a with-block exits the context managers, removing the patches).
+        """
+        from fla_charge import FlaChargeService
+
+        p_recover = patch('fla_charge.recover_orphan_temp_battery')
+        p_settings = patch('fla_charge.Settings', return_value=MockChargeSettings())
+        p_monitor = patch('fla_charge.DbusMonitor', return_value=monitor)
+        p_status = patch('fla_charge.StatusService', return_value=MockStatus())
+        p_update = patch.object(FlaChargeService, '_update_idle_status')
+
+        mock_recover = p_recover.start()
+        p_settings.start()
+        p_monitor.start()
+        p_status.start()
+        p_update.start()
+
+        self.addCleanup(p_recover.stop)
+        self.addCleanup(p_settings.stop)
+        self.addCleanup(p_monitor.stop)
+        self.addCleanup(p_status.stop)
+        self.addCleanup(p_update.stop)
+
+        return FlaChargeService, mock_recover
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=True)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_relay_open_with_subprocess_resumes(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=0)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        mock_recover.assert_called_once_with(0)
+        mock_threading.Thread.assert_called_once()
+        mock_safety.assert_not_called()
+
+    @patch('fla_charge.threading')
+    @patch('fla_charge.startup_safety_check')
+    @patch('fla_charge.is_temp_battery_running', return_value=False)
+    @patch('fla_charge.acquire_lock', return_value=True)
+    def test_relay_closed_runs_normal_safety_check(
+        self, mock_acquire, mock_running, mock_safety, mock_threading,
+    ):
+        monitor = MockMonitor(relay_state=1)
+        Service, mock_recover = self._service(monitor)
+        Service()
+        mock_recover.assert_called_once_with(1)
+        mock_threading.Thread.assert_not_called()
+        mock_safety.assert_called_once()
+
+
 if __name__ == '__main__':
     unittest.main()

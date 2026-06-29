@@ -21,10 +21,11 @@ from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 
 from dbus_monitor import DbusMonitor
-from temp_battery import TempBatteryService, recover_orphan_temp_battery
+from temp_battery import TempBatteryService, recover_orphan_temp_battery, is_temp_battery_running
 from relay_control import (
     open_relay, verify_relay_open, verify_relay_still_open,
     close_relay_verified, close_relay_delta_aware, startup_safety_check,
+    LFP_SAFE_CVL,
 )
 from voltage_matching import wait_for_match
 from aggregate_driver import stop as stop_aggregate, start as start_aggregate
@@ -524,19 +525,86 @@ class FlaChargeService:
     """Persistent service that checks conditions and runs FLA charge."""
 
     def __init__(self):
-        # Clear any orphaned temp battery before anything else — a half-dead
-        # fla_temp registration (e.g. dbus-daemon restarted mid-handoff) hangs
-        # systemcalc/aggregate D-Bus scans and would break this service too.
-        recover_orphan_temp_battery()
+        # Build the monitor first (cheap), read the live relay state, then do
+        # relay-aware orphan recovery — never kill a temp battery that is holding
+        # an isolated bus (relay open). get_relay_state() reads system only.
         self.settings = Settings()
         self.monitor = DbusMonitor(lfp_instance=277, trojan_instance=279)
+        relay_state = self.monitor.get_relay_state()
+        recover_orphan_temp_battery(relay_state)
         self.status = StatusService()
         self.status.register()
         self._running = False
         self._failed = False
-        startup_safety_check(self.monitor, self.status, alerting)
+        if not self._resume_interrupted_reconnect():
+            startup_safety_check(self.monitor, self.status, alerting)
         self._update_idle_status()
         log.info("FLA charge service started — checking every %ds", CHECK_INTERVAL_SEC)
+
+    def _resume_interrupted_reconnect(self):
+        """Adopt and finish a reconnect interrupted mid-hold (see EQ equivalent).
+
+        Returns True if this service took over (or another owns it), so the
+        caller skips startup_safety_check. False when there is nothing to resume."""
+        if self.monitor.get_relay_state() != 0:
+            return False
+        if not is_temp_battery_running():
+            return False
+        if not acquire_lock("fla-charge"):
+            log.info("RESUME: another service owns the interrupted reconnect — backing off")
+            return True
+        log.warning("RESUME: relay open + temp battery alive — adopting and finishing reconnect")
+        self._running = True
+
+        def _worker():
+            temp_service = TempBatteryService(device_instance=100)
+            temp_service.attach()
+            try:
+                self.status.update(state=STATE_VOLTAGE_MATCHING)
+                float_temp = self.monitor.get_battery_temperature()
+                matched, _ = wait_for_match(
+                    self.monitor, temp_service, self.status, alerting,
+                    voltage_delta_max=self.settings.voltage_delta_max,
+                    float_voltage=temp_compensate(self.settings.fla_float_voltage, float_temp),
+                )
+                if not matched:
+                    return
+                self.status.update(state=STATE_RECONNECTING)
+                if not close_relay_verified(self.monitor):
+                    alerting.raise_alarm("RESUME: failed to close relay 2", status_service=self.status)
+                    return
+                time.sleep(2)
+            except Exception as e:
+                log.exception("RESUME worker error: %s", e)
+            finally:
+                if self.monitor.get_relay_state() == 1:
+                    try:
+                        temp_service.deregister()
+                    except Exception:
+                        pass
+                    try:
+                        self.monitor.set_battery_service_setting("com.victronenergy.battery.aggregate")
+                        self.monitor.set_bms_instance(-1)
+                        self.monitor.set_dvcc_max_charge_voltage(LFP_SAFE_CVL)
+                    except Exception:
+                        log.error("RESUME: failed to restore DVCC to normal")
+                    try:
+                        start_aggregate()
+                        self.monitor.invalidate_services()
+                    except Exception:
+                        log.error("RESUME: failed to restart aggregate driver")
+                    release_lock()
+                    alerting.clear_alarm(status_service=self.status)
+                    log.info("RESUME: reconnect completed, control handed back to aggregate")
+                else:
+                    alerting.raise_alarm(
+                        "RESUME incomplete — bus held by temp battery, manual intervention required",
+                        status_service=self.status,
+                    )
+                self._running = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
 
     def _update_idle_status(self):
         v_trojan = self.monitor.get_trojan_voltage()
