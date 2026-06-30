@@ -30,6 +30,14 @@ SNAPSHOT_FILE = "/tmp/fla_dvcc_originals.json"
 TEMP_INSTANCE = 100
 TEMP_SERVICE = "com.victronenergy.battery/100"
 TEMP_CHARGE_CURRENT = 60.0  # FLA recommended max bulk current
+# After restart_systemcalc() returns, systemcalc's slow post-restart D-Bus scan
+# on Venus OS v3.80~33 keeps the bus congested, so the temp battery (instance
+# 100) can take far longer than the wait_for_service_instance 10s default to
+# answer a /DeviceInstance query. A 10s wait lost that race on 2026-06-28 and
+# aborted the handoff into a safe-hold. The temp battery holds a SAFE CVL
+# throughout this wait, so a generous timeout is free — same rationale as the
+# 300s com.victronenergy.system wait in restart_systemcalc().
+TEMP_DISCOVERY_TIMEOUT = 120
 
 # Per-service display states for the handoff phases (values differ per service).
 TakeoverStates = namedtuple(
@@ -135,7 +143,8 @@ class Takeover:
         # 3. Restart systemcalc so it discovers the temp battery.
         if not self.monitor.restart_systemcalc():
             return self._fail("Failed to restart systemcalc for temp battery discovery")
-        if not self.monitor.wait_for_service_instance(TEMP_INSTANCE):
+        if not self.monitor.wait_for_service_instance(
+                TEMP_INSTANCE, timeout_seconds=TEMP_DISCOVERY_TIMEOUT):
             return self._fail("Temp battery service instance 100 not discovered on D-Bus")
 
         # 4. Snapshot the DVCC originals (all three) BEFORE changing any of them,

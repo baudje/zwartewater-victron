@@ -89,6 +89,39 @@ class TestHandOffIn(unittest.TestCase):
     @patch('takeover.relay_control')
     @patch('takeover.TempBatteryService')
     @patch('takeover.time')
+    def test_temp_battery_discovery_waits_generously(self, mtime, MockTBS, mrelay, magg):
+        # On Venus OS v3.80~33, systemcalc's post-restart D-Bus scan congests the
+        # bus, so the temp battery (instance 100) can take far longer than the old
+        # 10s default to answer a /DeviceInstance query. The temp battery holds a
+        # safe CVL throughout this wait, so the timeout must be generous — the same
+        # rationale as the 300s systemcalc-name wait. Regression: a 10s wait lost
+        # the race on 2026-06-28 and aborted the handoff into a safe-hold.
+        mtime.sleep = MagicMock()
+        magg.stop.return_value = True
+        mrelay.open_relay.return_value = True
+        mrelay.verify_relay_open.return_value = True
+        MockTBS.return_value = MagicMock(**{"register.return_value": True})
+        monitor = MockMonitor(battery_service="com.victronenergy.battery/277", bms_instance=-1)
+        captured = {}
+        monitor.wait_for_service_instance = MagicMock(
+            side_effect=lambda instance, **k: captured.update(
+                instance=instance, timeout=k.get("timeout_seconds")
+            ) or "com.victronenergy.battery.fla_temp")
+
+        t = self._make(monitor)
+        ok = t.hand_off_in(safe_voltage=28.4, target_voltage=31.5)
+
+        self.assertTrue(ok)
+        self.assertEqual(captured["instance"], takeover.TEMP_INSTANCE)
+        # Must wait far longer than the old 10s default for the congested bus.
+        self.assertIsNotNone(captured["timeout"],
+                             "discovery timeout must be set explicitly, not left at the 10s default")
+        self.assertGreaterEqual(captured["timeout"], 120)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    @patch('takeover.time')
     def test_success_persists_snapshot_of_real_originals(self, mtime, MockTBS, mrelay, magg):
         mtime.sleep = MagicMock()
         magg.stop.return_value = True
