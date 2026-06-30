@@ -96,12 +96,17 @@ class Takeover:
     # the lock and NOT fall through to startup_safety_check.
     RESUME_HELD = object()
 
-    def __init__(self, monitor, status, alerting_mod, service_name, states):
+    def __init__(self, monitor, status, alerting_mod, service_name, states,
+                 should_abort=None):
         self.monitor = monitor
         self.status = status
         self.alerting = alerting_mod
         self.service_name = service_name
         self.states = states
+        # Operator-abort probe (e.g. the web "Abort" button). Injected because
+        # check_abort lives in each service's web_server; the shared handoff
+        # stays decoupled. Defaults to "never abort" so resume/tests need not set it.
+        self._should_abort = should_abort if should_abort is not None else (lambda: False)
         self.temp_service = None
         self._aggregate_stopped = False
         self._originals = None
@@ -118,6 +123,15 @@ class Takeover:
     def _fail(self, message):
         """Alarm, tear down, and signal failure."""
         self._alarm(message)
+        self.teardown()
+        return False
+
+    def _abort(self, message):
+        """Operator-requested abort during the handoff: tear down cleanly and
+        signal not-done. Unlike _fail this raises NO alarm — an abort is an
+        intentional action, not a fault. Safe only before the relay opens; the
+        relay-guarded teardown holds the bus if it is somehow already open."""
+        log.info("Takeover: %s — reconnecting (no alarm)", message)
         self.teardown()
         return False
 
@@ -140,11 +154,19 @@ class Takeover:
             return self._fail("Failed to stop aggregate driver")
         self._aggregate_stopped = True
 
-        # 3. Restart systemcalc so it discovers the temp battery.
-        if not self.monitor.restart_systemcalc():
+        # 3. Restart systemcalc so it discovers the temp battery. Both waits are
+        #    abort-aware: the systemcalc wait (up to 300s) and the discovery wait
+        #    (up to 120s) run before the relay opens, so an operator Abort during
+        #    either must reconnect cleanly instead of pressing on to the disconnect.
+        if not self.monitor.restart_systemcalc(should_abort=self._should_abort):
+            if self._should_abort():
+                return self._abort("Abort during systemcalc restart")
             return self._fail("Failed to restart systemcalc for temp battery discovery")
         if not self.monitor.wait_for_service_instance(
-                TEMP_INSTANCE, timeout_seconds=TEMP_DISCOVERY_TIMEOUT):
+                TEMP_INSTANCE, timeout_seconds=TEMP_DISCOVERY_TIMEOUT,
+                should_abort=self._should_abort):
+            if self._should_abort():
+                return self._abort("Abort during temp battery discovery")
             return self._fail("Temp battery service instance 100 not discovered on D-Bus")
 
         # 4. Snapshot the DVCC originals (all three) BEFORE changing any of them,
@@ -171,6 +193,12 @@ class Takeover:
             return self._fail("Failed to switch BmsInstance to temp battery")
         if not self.monitor.wait_for_bms_selection(TEMP_SERVICE, TEMP_INSTANCE):
             return self._fail("DVCC handoff to temp battery was not confirmed")
+
+        # Last safe moment: honour an operator Abort requested at any point before
+        # the irreversible LFP disconnect (e.g. during the DVCC switch above). The
+        # relay is still closed, so teardown reconnects cleanly with no alarm.
+        if self._should_abort():
+            return self._abort("Abort before LFP disconnect")
 
         # 6. Open relay 2 (isolate the LFP bank) — only now that DVCC is the temp battery.
         self.status.update(state=self.states.disconnecting)
