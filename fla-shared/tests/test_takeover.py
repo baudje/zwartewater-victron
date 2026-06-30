@@ -89,6 +89,39 @@ class TestHandOffIn(unittest.TestCase):
     @patch('takeover.relay_control')
     @patch('takeover.TempBatteryService')
     @patch('takeover.time')
+    def test_temp_battery_discovery_waits_generously(self, mtime, MockTBS, mrelay, magg):
+        # On Venus OS v3.80~33, systemcalc's post-restart D-Bus scan congests the
+        # bus, so the temp battery (instance 100) can take far longer than the old
+        # 10s default to answer a /DeviceInstance query. The temp battery holds a
+        # safe CVL throughout this wait, so the timeout must be generous — the same
+        # rationale as the 300s systemcalc-name wait. Regression: a 10s wait lost
+        # the race on 2026-06-28 and aborted the handoff into a safe-hold.
+        mtime.sleep = MagicMock()
+        magg.stop.return_value = True
+        mrelay.open_relay.return_value = True
+        mrelay.verify_relay_open.return_value = True
+        MockTBS.return_value = MagicMock(**{"register.return_value": True})
+        monitor = MockMonitor(battery_service="com.victronenergy.battery/277", bms_instance=-1)
+        captured = {}
+        monitor.wait_for_service_instance = MagicMock(
+            side_effect=lambda instance, **k: captured.update(
+                instance=instance, timeout=k.get("timeout_seconds")
+            ) or "com.victronenergy.battery.fla_temp")
+
+        t = self._make(monitor)
+        ok = t.hand_off_in(safe_voltage=28.4, target_voltage=31.5)
+
+        self.assertTrue(ok)
+        self.assertEqual(captured["instance"], takeover.TEMP_INSTANCE)
+        # Must wait far longer than the old 10s default for the congested bus.
+        self.assertIsNotNone(captured["timeout"],
+                             "discovery timeout must be set explicitly, not left at the 10s default")
+        self.assertGreaterEqual(captured["timeout"], 120)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    @patch('takeover.time')
     def test_success_persists_snapshot_of_real_originals(self, mtime, MockTBS, mrelay, magg):
         mtime.sleep = MagicMock()
         magg.stop.return_value = True
@@ -132,6 +165,56 @@ class TestHandOffIn(unittest.TestCase):
         ok = t.hand_off_in(safe_voltage=28.4, target_voltage=31.5)
         self.assertFalse(ok)
         magg.stop.assert_not_called()
+
+    def _make_abortable(self, monitor, should_abort):
+        return takeover.Takeover(monitor, self.status, self.alerting,
+                                 "fla-equalisation", _states(), should_abort=should_abort)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    @patch('takeover.time')
+    def test_abort_before_relay_open_reconnects_without_alarm(self, mtime, MockTBS, mrelay, magg):
+        # Operator Abort pending while the handoff runs: it must bail BEFORE the
+        # relay opens (no LFP disconnect) and raise NO alarm (abort is intentional).
+        mtime.sleep = MagicMock()
+        magg.stop.return_value = True
+        MockTBS.return_value = MagicMock(**{"register.return_value": True})
+        monitor = MockMonitor(battery_service="com.victronenergy.battery/277", bms_instance=-1)
+        t = self._make_abortable(monitor, should_abort=lambda: True)
+
+        ok = t.hand_off_in(safe_voltage=28.4, target_voltage=31.5)
+
+        self.assertFalse(ok)
+        mrelay.open_relay.assert_not_called()          # LFP never disconnected
+        self.alerting.raise_alarm.assert_not_called()  # abort != fault
+        magg.start.assert_called()                     # teardown reconnected the aggregate
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    @patch('takeover.time')
+    def test_abort_during_discovery_is_silent_but_timeout_alarms(self, mtime, MockTBS, mrelay, magg):
+        # When a wait returns falsy, abort and genuine timeout must diverge:
+        # abort -> clean (no alarm); timeout -> alarm. Same falsy return, different cause.
+        mtime.sleep = MagicMock()
+        magg.stop.return_value = True
+        MockTBS.return_value = MagicMock(**{"register.return_value": True})
+
+        # (a) wait aborted (returns None) with abort pending -> no alarm
+        monitor = MockMonitor()
+        monitor.wait_for_service_instance = MagicMock(return_value=None)
+        t = self._make_abortable(monitor, should_abort=lambda: True)
+        self.assertFalse(t.hand_off_in(safe_voltage=28.4, target_voltage=31.5))
+        self.alerting.raise_alarm.assert_not_called()
+
+        # (b) same falsy return but NO abort -> genuine timeout, must alarm
+        self.alerting.reset_mock()
+        monitor2 = MockMonitor()
+        monitor2.wait_for_service_instance = MagicMock(return_value=None)
+        t2 = self._make_abortable(monitor2, should_abort=lambda: False)
+        self.assertFalse(t2.hand_off_in(safe_voltage=28.4, target_voltage=31.5))
+        self.assertTrue(self.alerting.raise_alarm.called)
 
 
 class _TakeoverFixtureMixin:

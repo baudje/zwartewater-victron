@@ -136,7 +136,8 @@ def run_equalisation(settings, monitor, status):
         return False
 
     aborted_by_operator = False
-    t = Takeover(monitor, status, alerting, "fla-equalisation", EQ_TAKEOVER_STATES)
+    t = Takeover(monitor, status, alerting, "fla-equalisation", EQ_TAKEOVER_STATES,
+                 should_abort=check_abort)
     try:
         battery_temp = monitor.get_battery_temperature()
         eq_voltage = temp_compensate(settings.eq_voltage, battery_temp)

@@ -168,7 +168,8 @@ def run_charge(settings, monitor, status):
         log.info("Operation lock held — skipping")
         return False
 
-    t = Takeover(monitor, status, alerting, "fla-charge", CHARGE_TAKEOVER_STATES)
+    t = Takeover(monitor, status, alerting, "fla-charge", CHARGE_TAKEOVER_STATES,
+                 should_abort=check_abort)
     try:
         # === PHASE 1: Shared charging ===
         status.update(state=STATE_PHASE1_SHARED)

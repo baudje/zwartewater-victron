@@ -15,6 +15,14 @@ BATTERY_SOC = "/Soc"
 RELAY_STATE_PATH = "/Relay/1/State"  # Relay 2 (0-indexed)
 SYSTEM_SERVICE = "com.victronenergy.system"
 
+# Per-call reply timeout for a single GetValue. Without it, libdbus blocks on
+# the ~25s default, so one half-dead service can stall a discovery poll for
+# longer than the whole poll budget — and the loop deadline is only checked
+# between polls, so the outer timeout can be overshot unpredictably. A short
+# per-call bound keeps each poll cheap and the deadline meaningful; a service
+# that does not answer in 5s is treated as unreadable (None) and skipped.
+DBUS_CALL_TIMEOUT = 5.0
+
 
 def get_bus():
     """Return the shared system bus connection."""
@@ -28,7 +36,7 @@ def _get_dbus_value(bus, service, path):
     try:
         obj = bus.get_object(service, path)
         iface = dbus.Interface(obj, "com.victronenergy.BusItem")
-        value = iface.GetValue()
+        value = iface.GetValue(timeout=DBUS_CALL_TIMEOUT)
         # Victron publishes an empty array/dict variant to signal an invalid or
         # not-yet-populated value (e.g. a service that is on the bus but still
         # initialising). dbus.Array/Dictionary subclass list/dict, so check the
@@ -238,7 +246,7 @@ class DbusMonitor:
             log.error("Failed to set BmsInstance: %s", e)
             return False
 
-    def restart_systemcalc(self, system_timeout=300, system_poll=1.0):
+    def restart_systemcalc(self, system_timeout=300, system_poll=1.0, should_abort=None):
         """Restart dbus-systemcalc-py so it discovers newly registered battery
         services, then block until com.victronenergy.system re-registers.
 
@@ -263,7 +271,8 @@ class DbusMonitor:
                 log.error("Failed to start systemcalc: %s", up.stderr.decode())
                 return False
             if not self.wait_for_system_service(timeout_seconds=system_timeout,
-                                                poll_interval=system_poll):
+                                                poll_interval=system_poll,
+                                                should_abort=should_abort):
                 log.error("systemcalc restarted but com.victronenergy.system did "
                           "not re-register within %ds", system_timeout)
                 return False
@@ -273,14 +282,20 @@ class DbusMonitor:
             log.error("Failed to restart systemcalc: %s", e)
             return False
 
-    def wait_for_system_service(self, timeout_seconds=300, poll_interval=1.0):
+    def wait_for_system_service(self, timeout_seconds=300, poll_interval=1.0,
+                                should_abort=None):
         """Wait until com.victronenergy.system re-claims its D-Bus name.
 
         This name owns the GX relays; relay reads/writes fail with
         ServiceUnknown until it is back. Returns True once present, False on
-        timeout."""
+        timeout. If should_abort() becomes true, returns False early so an
+        operator Abort is honoured during this multi-minute wait (the relay is
+        still closed and the bus safe throughout)."""
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
+            if should_abort is not None and should_abort():
+                log.info("wait_for_system_service: operator abort — returning early")
+                return False
             try:
                 if self.bus.name_has_owner(SYSTEM_SERVICE):
                     return True
@@ -296,10 +311,21 @@ class DbusMonitor:
             return False
 
     def wait_for_service_instance(self, instance, prefix="com.victronenergy.battery",
-                                  timeout_seconds=10, poll_interval=0.5):
-        """Wait until a D-Bus service with the given instance becomes visible."""
+                                  timeout_seconds=120, poll_interval=0.5,
+                                  should_abort=None):
+        """Wait until a D-Bus service with the given instance becomes visible.
+
+        The default is 120s, not a few seconds: this is called right after a
+        systemcalc restart, whose slow post-restart D-Bus scan congests the bus
+        on Venus OS v3.80~33 (the same condition that forces the 300s
+        wait_for_system_service). A short default silently re-introduces the
+        2026-06-28 discovery-timeout abort for any caller that omits the value.
+        If should_abort() becomes true, returns None early."""
         deadline = time.time() + timeout_seconds
         while time.time() < deadline:
+            if should_abort is not None and should_abort():
+                log.info("wait_for_service_instance: operator abort — returning early")
+                return None
             service = _find_service(self.bus, prefix, instance)
             if service:
                 connected = _get_dbus_value(self.bus, service, "/Connected")

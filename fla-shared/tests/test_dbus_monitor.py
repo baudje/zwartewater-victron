@@ -43,6 +43,49 @@ class TestEmptyArraySentinel(unittest.TestCase):
             _get_dbus_value(MagicMock(), "com.victronenergy.battery.aggregate", "/Soc")
         )
 
+    def test_get_dbus_value_bounds_each_call_with_a_timeout(self):
+        # Without a per-call timeout, libdbus blocks ~25s on a half-dead service,
+        # overshooting the discovery poll budget. Each GetValue must be bounded.
+        self.dbus_mod.Interface.return_value.GetValue.return_value = []
+        _get_dbus_value(MagicMock(), "com.victronenergy.battery.fla_temp", "/DeviceInstance")
+        self.dbus_mod.Interface.return_value.GetValue.assert_called_with(
+            timeout=dbus_monitor.DBUS_CALL_TIMEOUT)
+
+
+class TestWaitTimeoutsAndAbort(unittest.TestCase):
+    """The post-systemcalc-restart waits must default to a generous timeout and
+    honour an operator abort instead of blocking the full multi-minute wait."""
+
+    def test_wait_for_service_instance_default_timeout_is_generous(self):
+        # A short default silently re-introduces the 2026-06-28 discovery abort
+        # for any caller that omits the timeout. It must be >= the documented bump.
+        import inspect
+        default = inspect.signature(
+            dbus_monitor.DbusMonitor.wait_for_service_instance
+        ).parameters["timeout_seconds"].default
+        self.assertGreaterEqual(default, 120)
+
+    @patch('dbus_monitor.time')
+    def test_wait_for_service_instance_aborts_early(self, mock_time):
+        mock_time.time.return_value = 0  # deadline never passes
+        mock_time.sleep = MagicMock()
+        m = dbus_monitor.DbusMonitor()
+        m.bus = MagicMock()
+        # should_abort fires immediately -> return None before any discovery work
+        self.assertIsNone(
+            m.wait_for_service_instance(100, should_abort=lambda: True))
+        m.bus.list_names.assert_not_called()
+
+    @patch('dbus_monitor.time')
+    def test_wait_for_system_service_aborts_early(self, mock_time):
+        mock_time.time.return_value = 0
+        mock_time.sleep = MagicMock()
+        m = dbus_monitor.DbusMonitor()
+        m.bus = MagicMock()
+        self.assertFalse(
+            m.wait_for_system_service(should_abort=lambda: True))
+        m.bus.name_has_owner.assert_not_called()
+
 
 @patch('dbus_monitor.subprocess')
 @patch('dbus_monitor.time')

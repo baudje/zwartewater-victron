@@ -88,11 +88,11 @@ class MockMonitor:
         self._bms_instance = instance
         return True
 
-    def restart_systemcalc(self):
+    def restart_systemcalc(self, system_timeout=300, system_poll=1.0, should_abort=None):
         return True
 
     def wait_for_service_instance(self, instance, prefix="com.victronenergy.battery",
-                                  timeout_seconds=10, poll_interval=0.5):
+                                  timeout_seconds=120, poll_interval=0.5, should_abort=None):
         return "com.victronenergy.battery.fla_equalisation"
 
     def wait_for_bms_selection(self, battery_service, bms_instance,
