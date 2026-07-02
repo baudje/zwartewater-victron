@@ -126,3 +126,56 @@ class MockStatus:
 
     def clear_alarm_path(self):
         pass
+
+
+class ProfileContractMixin:
+    """Anti-drift contract for an Operation profile (ADR-0002), shared by
+    both services' test_operation_profile.py so a new invariant added here
+    guards BOTH profiles at once (per-service copies of these assertions
+    had already drifted within one PR).
+
+    Subclasses set: PROFILE, SETTINGS_DEFS, STATUS_MOD, EXPECTED_NAME,
+    EXPECTED_PORT, EXPECTED_TITLE_SUBSTRING, SERVICE_DIR.
+    """
+
+    def test_states_exactly_cover_the_state_enum(self):
+        enum_values = {v for k, v in vars(self.STATUS_MOD).items()
+                       if k.startswith("STATE_") and isinstance(v, int)}
+        self.assertEqual(set(self.PROFILE.states.keys()), enum_values)
+        self.assertEqual(self.PROFILE.error_state, self.STATUS_MOD.STATE_ERROR)
+
+    def test_state_labels_match_the_status_service(self):
+        # One source of truth: the profile must carry STATE_NAMES itself,
+        # not a hand-copied variant.
+        self.assertEqual(self.PROFILE.states, self.STATUS_MOD.STATE_NAMES)
+
+    def test_identity(self):
+        self.assertEqual(self.PROFILE.name, self.EXPECTED_NAME)
+        self.assertEqual(self.PROFILE.port, self.EXPECTED_PORT)
+        self.assertIn(self.EXPECTED_TITLE_SUBSTRING, self.PROFILE.title)
+
+    def test_cross_origin_control_covers_both_dashboards_only(self):
+        # The unified page on either port may control this service; any
+        # other origin port must stay refused (CSRF guard).
+        self.assertEqual(set(self.PROFILE.allowed_origin_ports), {8088, 8089})
+
+    def test_settings_rows_are_valid_setting_keys(self):
+        import re
+        page = self.PROFILE.render_page()
+        row_keys = set(re.findall(r'data-key="([^"]+)"', page))
+        self.assertTrue(row_keys, "page has no settings rows")
+        self.assertTrue(row_keys.issubset(set(self.PROFILE.settings_keys)),
+                        "page rows not in schema: %s"
+                        % (row_keys - set(self.PROFILE.settings_keys)))
+        self.assertEqual(set(self.PROFILE.settings_keys), set(self.SETTINGS_DEFS))
+
+    def test_page_shows_every_state_label(self):
+        page = self.PROFILE.render_page()
+        for label in self.PROFILE.states.values():
+            self.assertIn(label, page)
+
+    def test_old_web_server_module_is_gone(self):
+        import os
+        self.assertFalse(
+            os.path.exists(os.path.join(self.SERVICE_DIR, 'web_server.py')),
+            "per-service web_server.py must be deleted (replaced by the shared engine)")

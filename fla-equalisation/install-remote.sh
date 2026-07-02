@@ -29,7 +29,7 @@ for f in \
     dbus_status_service.py \
     settings.py \
     alerting.py \
-    web_server.py \
+    operation_profile.py \
 ; do
     wget -qO "${INSTALL_DIR}/${f}" "${BASE_URL}/${f}"
     echo "  ${f}"
@@ -55,6 +55,8 @@ for f in \
     temp_battery.py \
     temp_battery_process.py \
     temp_compensation.py \
+    takeover.py \
+    web_engine.py \
 ; do
     wget -qO "${SHARED_DIR}/${f}" "${SHARED_URL}/${f}"
     echo "  ${f}"

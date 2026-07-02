@@ -670,21 +670,18 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
 
     def setUp(self):
         # Drive FlaEqualisationService._apply_pending_settings directly
-        # (it only touches self.settings._write and the module-global
+        # (it only touches self.settings._write and the module-bound
         # drain_pending_settings, so we don't need a full service).
-        from fla_equalisation import FlaEqualisationService
+        from fla_equalisation import FlaEqualisationService, _engine
         self.svc = FlaEqualisationService.__new__(FlaEqualisationService)
         self.svc.settings = MagicMock()
-        # Make sure no stale pending_settings leak in from prior tests.
-        from web_server import _cache, _pending_settings_lock
-        with _pending_settings_lock:
-            _cache.pop("pending_settings", None)
-        self._cache = _cache
-        self._cache_lock = _pending_settings_lock
+        self._engine = _engine
+        # Make sure no stale pending settings leak in from prior tests.
+        self._engine.drain_pending_settings()
 
     def _enqueue(self, key, value):
-        with self._cache_lock:
-            self._cache.setdefault("pending_settings", []).append((key, value))
+        # Same public path the HTTP POST /api/setting handler uses.
+        self._engine.queue_setting(key, value)
 
     def test_eq_voltage_above_max_is_rejected(self):
         """31.5V was the cap before it was tightened to 32.0V; either way,
@@ -699,8 +696,11 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
         self.svc._apply_pending_settings()
         self.svc.settings._write.assert_not_called()
 
-    def test_unknown_key_is_skipped(self):
-        self._enqueue("not_a_real_setting", 42)
+    def test_unknown_key_is_refused_at_the_queue(self):
+        # The engine validates keys against the profile's schema at queue
+        # time — an unknown key can no longer even enter the pipeline.
+        with self.assertRaises(ValueError):
+            self._enqueue("not_a_real_setting", 42)
         self.svc._apply_pending_settings()
         self.svc.settings._write.assert_not_called()
 
@@ -712,7 +712,6 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
     def test_mixed_batch_writes_only_valid_entries(self):
         self._enqueue("eq_voltage", 30.0)        # in range
         self._enqueue("eq_voltage", 99.0)        # out of range — rejected
-        self._enqueue("not_a_real_setting", 1)   # unknown — skipped
         self._enqueue("lfp_soc_min", 90)         # in range
         self.svc._apply_pending_settings()
         # Only the two in-range writes reach _write.
@@ -893,6 +892,51 @@ class TestResumeOnStartup(unittest.TestCase):
         mock_recover.assert_called_once_with(1)
         mock_threading.Thread.assert_not_called()
         mock_safety.assert_called_once()
+
+
+class TestCheckStartsWorker(unittest.TestCase):
+    """Regression for the missed web_server→engine conversion: _check()'s
+    should-run branch executed a leftover `_cache[...]` reference after the
+    import was removed, raising NameError AFTER `self._running = True` —
+    the blanket except swallowed it, the worker never spawned, and the
+    service was wedged 'running' forever. All 275 tests stayed green
+    because nothing drove this branch."""
+
+    def _service(self):
+        from fla_equalisation import FlaEqualisationService
+        svc = FlaEqualisationService.__new__(FlaEqualisationService)
+        svc.settings = MagicMock()
+        svc.monitor = MagicMock()
+        svc.status = MagicMock()
+        svc._running = False
+        svc._failed = False
+        # Idle-status refresh reads live D-Bus values — not under test here.
+        svc._update_idle_status = lambda: None
+        return svc
+
+    @patch('fla_equalisation.threading.Thread')
+    @patch('fla_equalisation.should_run', return_value=True)
+    def test_should_run_branch_spawns_the_worker(self, _sr, mock_thread):
+        svc = self._service()
+        svc._check()
+        # The worker must be spawned — a swallowed exception between
+        # `self._running = True` and Thread(...) leaves the service wedged.
+        mock_thread.assert_called_once()
+        mock_thread.return_value.start.assert_called_once()
+        self.assertTrue(svc._running)
+
+    @patch('fla_equalisation.threading.Thread')
+    @patch('fla_equalisation.should_run', return_value=True)
+    def test_web_run_now_flag_is_cleared_when_run_starts(self, _sr, mock_thread):
+        from fla_equalisation import _engine
+        svc = self._service()
+        _engine._run_now_requested = True  # queued via web while conditions align
+        try:
+            svc._check()
+            self.assertFalse(_engine.check_run_now(),
+                             "queued web RunNow must be discarded once a run starts")
+        finally:
+            _engine.clear_run_now()
 
 
 if __name__ == '__main__':

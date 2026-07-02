@@ -104,8 +104,9 @@ class Takeover:
         self.service_name = service_name
         self.states = states
         # Operator-abort probe (e.g. the web "Abort" button). Injected because
-        # check_abort lives in each service's web_server; the shared handoff
-        # stays decoupled. Defaults to "never abort" so resume/tests need not set it.
+        # check_abort lives on each service's web engine instance; the shared
+        # handoff stays decoupled. Defaults to "never abort" so resume/tests
+        # need not set it.
         self._should_abort = should_abort if should_abort is not None else (lambda: False)
         self.temp_service = None
         self._aggregate_stopped = False

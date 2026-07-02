@@ -1,52 +1,27 @@
-"""Simple web UI for FLA equalisation status and control.
+"""Operation profile for the FLA equalisation dashboard (ADR-0002).
 
-Serves a single-page dashboard at port 8088 on the Cerbo GX.
-Access via http://venus.local:8088
-
-Data is read from a shared cache dict updated by the main GLib loop,
-avoiding cross-thread D-Bus calls.
+The single declarative card that distinguishes this service's web UI from
+fla-charge's. The shared engine (fla-shared/web_engine.py) is closed and
+configured by this card — the plumbing cannot drift; only what is declared
+here may differ. States and settings come from this service's own maps so
+the page can never disagree with the state machine or the settings schema.
 """
 
-import json
-import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Lock, Thread
+import os
+import sys
 
-log = logging.getLogger(__name__)
+sys.path.insert(1, os.path.join(os.path.dirname(__file__), "..", "fla-shared"))
 
-PORT = 8088
+from web_engine import OperationProfile
+from settings import SETTINGS_DEFS
+from dbus_status_service import STATE_NAMES, STATE_ERROR
 
-_pending_settings_lock = Lock()
-
-
-def drain_pending_settings():
-    """Atomically take pending web UI setting updates for the GLib thread."""
-    with _pending_settings_lock:
-        return _cache.pop("pending_settings", None) or []
-
-
-# Shared cache — written by GLib thread, read by HTTP thread
-_cache = {
-    "state": None,
-    "time_remaining": 0,
-    "trojan_voltage": None,
-    "lfp_voltage": None,
-    "voltage_delta": None,
-    "last_equalisation": None,
-    "days_until_next": None,
-    "settings": {},
-    "run_now_requested": False,
-    "abort_requested": False,
-    "inrush_current": None,
-    "reconnect_delta": None,
-}
-
-HTML_PAGE = """<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>FLA Equalisation</title>
+<title>__TITLE__</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, sans-serif; background: #0d1b2a; color: #e0e0e0;
@@ -77,7 +52,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>FLA Equalisation</h1>
+<h1>__TITLE__</h1>
 
 <div class="card">
   <h2>Status</h2>
@@ -124,12 +99,11 @@ HTML_PAGE = """<!DOCTYPE html>
 <div class="updated" id="updated"></div>
 
 <script>
-var STATES = {0:"Idle", 1:"Stopping driver", 2:"Disconnecting LFP",
-  3:"Equalising FLA", 4:"Cooling down", 5:"Voltage matching",
-  6:"Reconnecting LFP", 7:"Restarting driver", 8:"Error"};
+var STATES = __STATES__;
+var ERROR_STATE = __ERROR_STATE__;
 var initialLoad = true;
 
-function sc(s) { return s===0?"idle":s===8?"error":"active"; }
+function sc(s) { return s===0?"idle":s===ERROR_STATE?"error":"active"; }
 function fmt(v,u,d) { return (v==null||v==undefined)? "-" : parseFloat(v).toFixed(d||2)+" "+(u||""); }
 function fmtT(s) { if(!s||s<=0) return "-"; var m=Math.floor(s/60),h=Math.floor(m/60); return h>0?h+"h "+(m%60)+"m":m+"m"; }
 function si(id,v) { var e=document.getElementById(id); if(e&&(initialLoad||document.activeElement!==e)) e.value=v!=null?v:""; }
@@ -172,7 +146,7 @@ function refresh() {
       var sel=document.getElementById("s_enabled"); if(sel) sel.value=d.settings.enabled?"1":"0";
     }
     var ab=document.getElementById("abortBtn");
-    if(ab) ab.style.display=(d.state>0&&d.state<8)?"inline-block":"none";
+    if(ab) ab.style.display=(d.state>0&&d.state<ERROR_STATE)?"inline-block":"none";
     document.getElementById("updated").textContent="Updated "+new Date().toLocaleTimeString();
     initialLoad=false;
   }).catch(function(e){
@@ -203,117 +177,33 @@ setInterval(refresh,5000);
 </body>
 </html>"""
 
-
-def update_cache(state=None, time_remaining=None, trojan_v=None, lfp_v=None,
-                 voltage_delta=None, last_eq=None, days_until=None, settings=None,
-                 inrush_current=None, reconnect_delta=None):
-    """Update the shared cache atomically from the GLib main loop thread."""
-    updates = {}
-    if state is not None: updates["state"] = state
-    if time_remaining is not None: updates["time_remaining"] = time_remaining
-    if trojan_v is not None: updates["trojan_voltage"] = trojan_v
-    if lfp_v is not None: updates["lfp_voltage"] = lfp_v
-    if voltage_delta is not None: updates["voltage_delta"] = voltage_delta
-    if last_eq is not None: updates["last_equalisation"] = last_eq
-    if days_until is not None: updates["days_until_next"] = days_until
-    if settings is not None: updates["settings"] = settings
-    if inrush_current is not None: updates["inrush_current"] = inrush_current
-    if reconnect_delta is not None: updates["reconnect_delta"] = reconnect_delta
-    _cache.update(updates)
-
-
-def check_run_now():
-    """Check and clear the run_now flag (called from GLib thread)."""
-    if _cache["run_now_requested"]:
-        _cache["run_now_requested"] = False
-        return True
-    return False
-
-
-def check_abort():
-    """Check if abort was requested via web UI. Non-destructive read — flag stays set
-    until the running operation sees it and clears it."""
-    return _cache.get("abort_requested", False)
-
-
-def clear_abort():
-    """Clear the abort flag after the operation has handled it."""
-    _cache["abort_requested"] = False
-
-
-class RequestHandler(BaseHTTPRequestHandler):
-    """HTTP request handler — reads from cache, no D-Bus calls."""
-
-    def log_message(self, format, *args):
-        pass
-
-    def do_GET(self):
-        if self.path == "/" or self.path == "/index.html":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(HTML_PAGE.encode())
-        elif self.path == "/api/status":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(_cache).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-    def do_POST(self):
-        if self.path == "/api/abort":
-            _cache["abort_requested"] = True
-            msg = {"message": "Abort requested — will stop at next check cycle"}
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(msg).encode())
-            return
-        elif self.path == "/api/run-now":
-            _cache["run_now_requested"] = True
-            soc_min = (_cache.get("settings") or {}).get("lfp_soc_min", 95)
-            msg = {"message": "RunNow requested — will start at next check (SoC must be >= %d%%)" % soc_min}
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(msg).encode())
-        elif self.path == "/api/setting":
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-            try:
-                data = json.loads(body)
-                key = data["key"]
-                value = data["value"]
-                
-                from settings import SETTINGS_DEFS
-                if key not in SETTINGS_DEFS:
-                    raise ValueError("Unknown setting key: " + str(key))
-
-                # Store in cache — the GLib thread will pick it up and write to D-Bus
-                with _pending_settings_lock:
-                    _cache.setdefault("pending_settings", []).append((key, value))
-                # Also update cache immediately so UI sees the change
-                if "settings" in _cache and isinstance(_cache["settings"], dict):
-                    _cache["settings"][key] = value
-                msg = {"ok": True, "key": key, "value": value}
-            except Exception as e:
-                msg = {"ok": False, "error": str(e)}
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(msg).encode())
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-
-def start_web_server():
-    """Start the web server in a background thread."""
-    server = HTTPServer(("0.0.0.0", PORT), RequestHandler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    log.info("Web UI started at http://0.0.0.0:%d", PORT)
-    return server
+PROFILE = OperationProfile(
+    name="fla-equalisation",
+    title="FLA Equalisation",
+    port=8088,
+    states=STATE_NAMES,
+    error_state=STATE_ERROR,
+    settings_keys=list(SETTINGS_DEFS),
+    # Cross-origin control is limited to pages served by the Cerbo itself:
+    # this dashboard and its peer (fla-charge on 8089).
+    allowed_origin_ports=[8088, 8089],
+    cache_fields={
+        "state": None,
+        "time_remaining": 0,
+        "trojan_voltage": None,
+        "lfp_voltage": None,
+        "voltage_delta": None,
+        "last_equalisation": None,
+        "days_until_next": None,
+        "inrush_current": None,
+        "reconnect_delta": None,
+        "settings": {},
+    },
+    cache_aliases={"last_eq": "last_equalisation", "days_until": "days_until_next"},
+    # Name the start precondition in the run-now reply (with the live
+    # threshold), so curl/scripted callers learn why a run may not start.
+    run_now_message=lambda s: (
+        "RunNow requested — will start at next check (SoC must be >= %d%%)"
+        % int(s.get("lfp_soc_min") or 95)),
+    html_template=HTML_TEMPLATE,
+)
