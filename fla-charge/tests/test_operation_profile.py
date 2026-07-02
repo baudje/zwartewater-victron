@@ -38,6 +38,11 @@ class TestChargeProfileCompleteness(unittest.TestCase):
         self.assertEqual(PROFILE.port, 8089)
         self.assertIn("Charge", PROFILE.title)
 
+    def test_cross_origin_control_covers_both_dashboards_only(self):
+        # The unified page on either port may control this service; any
+        # other origin port must stay refused (CSRF guard).
+        self.assertEqual(set(PROFILE.allowed_origin_ports), {8088, 8089})
+
     def test_settings_rows_are_valid_setting_keys(self):
         page = PROFILE.render_page()
         row_keys = set(re.findall(r'data-key="([^"]+)"', page))

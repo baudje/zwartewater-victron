@@ -32,6 +32,7 @@ def make_profile(**overrides):
         states={0: "Idle", 1: "Busy", 2: "Error"},
         error_state=2,
         settings_keys=["eq_voltage", "lfp_soc_min"],
+        allowed_origin_ports=[8088, 8089],
         cache_fields={
             "state": None,
             "time_remaining": 0,
@@ -154,27 +155,87 @@ class TestSettingsEndpoint(ControlTestCase):
 
 class TestCrossOriginControl(ControlTestCase):
     """The unified page is served from one port but controls both services;
-    the browser preflights its JSON POSTs with OPTIONS."""
+    the browser preflights its JSON POSTs with OPTIONS.
 
-    def test_options_preflight_allows_cross_origin_post(self):
+    Reads are world-readable (*), but WRITES only accept origins on the
+    same host as the request at the dashboard ports — a malicious website
+    visited from a browser on the vessel LAN must not be able to drive
+    Run Now / Abort cross-origin (CSRF)."""
+
+    def post_from(self, path, origin, body=None):
+        data = json.dumps(body).encode() if body is not None else b""
+        req = urllib.request.Request(
+            self.base + path, data=data, method="POST",
+            headers={"Content-Type": "application/json", "Origin": origin})
+        try:
+            return urllib.request.urlopen(req, timeout=5)
+        except urllib.error.HTTPError as e:
+            return e
+
+    def allowed_origin(self):
+        # Same host the page would be served from, at a dashboard port.
+        return "http://127.0.0.1:8089"
+
+    def test_options_preflight_allows_dashboard_origin(self):
         req = urllib.request.Request(
             self.base + "/api/setting", method="OPTIONS",
-            headers={"Origin": "http://venus.local:8089",
+            headers={"Origin": self.allowed_origin(),
                      "Access-Control-Request-Method": "POST",
                      "Access-Control-Request-Headers": "Content-Type"})
         resp = urllib.request.urlopen(req, timeout=5)
         self.assertIn(resp.status, (200, 204))
-        self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
+        # The specific origin is echoed — never a wildcard on control paths.
+        self.assertEqual(resp.headers["Access-Control-Allow-Origin"],
+                         self.allowed_origin())
+        self.assertEqual(resp.headers["Vary"], "Origin")
         self.assertIn("POST", resp.headers["Access-Control-Allow-Methods"])
         self.assertIn("Content-Type", resp.headers["Access-Control-Allow-Headers"])
 
-    def test_post_responses_carry_cors_header(self):
+    def test_options_preflight_refuses_foreign_origin(self):
+        for origin in ("http://evil.example",          # wrong host + port
+                       "http://evil.example:8089",     # right port, wrong host
+                       "http://127.0.0.1:9999"):       # right host, wrong port
+            req = urllib.request.Request(
+                self.base + "/api/abort", method="OPTIONS",
+                headers={"Origin": origin,
+                         "Access-Control-Request-Method": "POST"})
+            try:
+                resp = urllib.request.urlopen(req, timeout=5)
+            except urllib.error.HTTPError as e:
+                resp = e
+            self.assertEqual(resp.status, 403, "preflight not refused for %s" % origin)
+            self.assertIsNone(resp.headers["Access-Control-Allow-Origin"])
+
+    def test_post_from_foreign_origin_is_refused_and_has_no_effect(self):
+        resp = self.post_from("/api/run-now", "http://evil.example")
+        self.assertEqual(resp.status, 403)
+        self.assertIsNone(resp.headers["Access-Control-Allow-Origin"])
+        self.assertFalse(self.engine.check_run_now(),
+                         "foreign-origin POST must not set the run-now flag")
+        resp = self.post_from("/api/abort", "http://evil.example")
+        self.assertEqual(resp.status, 403)
+        self.assertFalse(self.engine.check_abort())
+
+    def test_post_from_dashboard_origin_echoes_origin(self):
         for path, body in (("/api/run-now", None),
                            ("/api/abort", None),
                            ("/api/setting", {"key": "eq_voltage", "value": 31.0})):
-            resp = self.post(path, body)
-            self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*",
-                             "missing CORS header on POST %s" % path)
+            resp = self.post_from(path, self.allowed_origin(), body)
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers["Access-Control-Allow-Origin"],
+                             self.allowed_origin(),
+                             "origin not echoed on POST %s" % path)
+
+    def test_post_without_origin_still_works(self):
+        # Non-browser clients (curl, local tooling) send no Origin header;
+        # CORS is a browser control and must not break them.
+        resp = self.post("/api/run-now")
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(self.engine.check_run_now())
+
+    def test_status_read_stays_world_readable(self):
+        resp = self.get("/api/status")
+        self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
 
 
 class TestUpdateCacheContract(unittest.TestCase):

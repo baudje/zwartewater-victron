@@ -191,6 +191,9 @@ PROFILE = OperationProfile(
     states=STATE_NAMES,
     error_state=STATE_ERROR,
     settings_keys=list(SETTINGS_DEFS),
+    # Cross-origin control is limited to pages served by the Cerbo itself:
+    # this dashboard and its peer (fla-equalisation on 8088).
+    allowed_origin_ports=[8088, 8089],
     cache_fields={
         "state": None,
         "time_remaining": 0,

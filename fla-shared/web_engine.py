@@ -16,6 +16,7 @@ import json
 import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Lock, Thread
+from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -31,8 +32,12 @@ class OperationProfile:
 
     def __init__(self, name, title, port, states, error_state,
                  settings_keys, cache_fields, html_template,
-                 cache_aliases=None):
+                 cache_aliases=None, allowed_origin_ports=None):
         self.cache_aliases = cache_aliases or {}
+        # Ports whose pages may issue cross-origin control POSTs (the two
+        # dashboard ports). Origins on other ports — or other hosts — are
+        # refused; see WebEngine._origin_allowed.
+        self.allowed_origin_ports = allowed_origin_ports or [port]
         self.name = name
         self.title = title
         self.port = port
@@ -144,12 +149,46 @@ class WebEngine:
             req.end_headers()
             req.wfile.write(self._page.encode())
         elif req.path == "/api/status":
-            self._send_json(req, self._cache)
+            self._send_json(req, self._cache, read_only=True)
         else:
             req.send_response(404)
             req.end_headers()
 
+    def _origin_allowed(self, req):
+        """CSRF guard for the control endpoints.
+
+        Reads are world-readable, but writes must not be drivable by an
+        arbitrary website visited from a browser on the vessel LAN. The
+        unified page is always served from the Cerbo itself, so a browser
+        write is legitimate only when its Origin is the SAME HOST the
+        client addressed (works for venus.local and raw-IP browsing alike)
+        at one of the dashboard ports. Requests without an Origin header
+        (curl, local tooling — not subject to CSRF) are allowed."""
+        origin = req.headers.get("Origin")
+        if origin is None:
+            return True
+        try:
+            parts = urlsplit(origin)
+            origin_port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError:
+            return False
+        request_host = (req.headers.get("Host") or "").rsplit(":", 1)[0]
+        return (parts.scheme in ("http", "https")
+                and parts.hostname == request_host
+                and origin_port in self.profile.allowed_origin_ports)
+
+    def _refuse_origin(self, req):
+        # 403 with NO CORS headers: the browser both blocks the read and
+        # the server has refused the action.
+        req.send_response(403)
+        req.send_header("Content-Type", "application/json")
+        req.end_headers()
+        req.wfile.write(json.dumps({"ok": False, "error": "origin not allowed"}).encode())
+
     def _handle_post(self, req):
+        if not self._origin_allowed(req):
+            self._refuse_origin(req)
+            return
         if req.path == "/api/run-now":
             self._run_now_requested = True
             self._send_json(req, {"message": "RunNow requested — will start at next check"})
@@ -213,21 +252,33 @@ class WebEngine:
         return pending
 
     def _handle_options(self, req):
-        """CORS preflight for the cross-port control POSTs."""
+        """CORS preflight for the cross-port control POSTs. Only origins on
+        this host at the dashboard ports are approved (echoed, never *)."""
+        if not self._origin_allowed(req) or "Origin" not in req.headers:
+            self._refuse_origin(req)
+            return
         req.send_response(204)
-        self._send_cors_headers(req)
+        self._send_write_cors_headers(req)
         req.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         req.send_header("Access-Control-Allow-Headers", "Content-Type")
         req.end_headers()
 
-    def _send_json(self, req, payload):
+    def _send_json(self, req, payload, read_only=False):
         req.send_response(200)
         req.send_header("Content-Type", "application/json")
-        self._send_cors_headers(req)
+        if read_only:
+            # Reads carry no control authority — world-readable is fine and
+            # lets the unified page poll both services from either port.
+            req.send_header("Access-Control-Allow-Origin", "*")
+        else:
+            self._send_write_cors_headers(req)
         req.end_headers()
         req.wfile.write(json.dumps(payload).encode())
 
-    def _send_cors_headers(self, req):
-        # The unified page is loaded from ONE service's port but must read
-        # and control BOTH services — every API response allows cross-origin.
-        req.send_header("Access-Control-Allow-Origin", "*")
+    def _send_write_cors_headers(self, req):
+        # Echo the (already validated) specific origin — never a wildcard
+        # on state-changing paths.
+        origin = req.headers.get("Origin")
+        if origin:
+            req.send_header("Access-Control-Allow-Origin", origin)
+            req.send_header("Vary", "Origin")
