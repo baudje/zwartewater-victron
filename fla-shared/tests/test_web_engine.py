@@ -82,6 +82,7 @@ class TestServesDashboardPage(EngineHttpTestCase):
         self.assertIn("/api/config", body)
         self.assertIn("/api/status", body)
         self.assertIn("/api/log", body)
+        self.assertIn("/api/runs", body)
         self.assertNotIn("__PORTS__", body)
 
     def test_page_is_identical_regardless_of_profile(self):
@@ -414,6 +415,42 @@ class TestLogEndpoint(EngineHttpTestCase):
             url = "http://127.0.0.1:%d/api/log" % server.server_address[1]
             data = json.loads(urllib.request.urlopen(url, timeout=5).read().decode())
             self.assertEqual(data["lines"], [])
+        finally:
+            server.shutdown()
+
+
+class TestRunsEndpoint(EngineHttpTestCase):
+    def setUp(self):
+        import tempfile
+        from run_history import append_run
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        for i in range(15):
+            append_run(f.name, {"outcome": "success", "n": i})
+        self.engine = WebEngine(make_profile(run_history_file=f.name))
+        self.server = self.engine.start()
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def test_runs_returns_newest_first_with_cors(self):
+        resp = self.get("/api/runs?limit=3")
+        self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
+        data = json.loads(resp.read().decode())
+        self.assertEqual([r["n"] for r in data["runs"]], [14, 13, 12])
+
+    def test_default_limit_and_server_side_cap(self):
+        data = json.loads(self.get("/api/runs").read().decode())
+        self.assertEqual(len(data["runs"]), 10)
+        data = json.loads(self.get("/api/runs?limit=99999").read().decode())
+        self.assertLessEqual(len(data["runs"]), 50)
+
+    def test_profile_without_history_file_yields_empty(self):
+        engine = WebEngine(make_profile())
+        server = engine.start()
+        try:
+            url = "http://127.0.0.1:%d/api/runs" % server.server_address[1]
+            data = json.loads(urllib.request.urlopen(url, timeout=5).read().decode())
+            self.assertEqual(data["runs"], [])
         finally:
             server.shutdown()
 

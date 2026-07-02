@@ -34,6 +34,7 @@ from alerting import raise_alarm, clear_alarm
 from relay_control import verify_relay_still_open, startup_safety_check
 from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock
+from run_history import append_run
 # One closed engine, configured by this service's Operation profile
 # (ADR-0002). Module-level bindings keep every call site — and the test
 # suite's patch targets — identical to the old per-service web_server.
@@ -70,6 +71,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 LAST_EQ_FILE = "/data/apps/fla-equalisation/last_equalisation"
+# One JSON line per finished run (success/aborted/failed) — issue #25.
+RUN_HISTORY_FILE = "/data/apps/fla-equalisation/run-history.jsonl"
 CHECK_INTERVAL_SEC = 60  # Check conditions every 60 seconds
 
 
@@ -140,6 +143,10 @@ def run_equalisation(settings, monitor, status):
         return False
 
     aborted_by_operator = False
+    run_started = datetime.now()
+    # Written on EVERY exit path (finally); outcome upgraded on the way out.
+    run_record = {"outcome": "failed", "peak_trojan_voltage": None,
+                  "minutes_at_target": None, "reconnect_delta": None}
     t = Takeover(monitor, status, alerting, "fla-equalisation", EQ_TAKEOVER_STATES,
                  should_abort=check_abort)
     try:
@@ -170,6 +177,10 @@ def run_equalisation(settings, monitor, status):
             status.update(time_remaining=remaining, trojan_v=v_trojan, lfp_v=v_lfp)
             update_cache(state=STATE_EQUALISING, time_remaining=remaining,
                          trojan_v=v_trojan, lfp_v=v_lfp, voltage_delta=delta)
+
+            if v_trojan is not None and (run_record["peak_trojan_voltage"] is None
+                                          or v_trojan > run_record["peak_trojan_voltage"]):
+                run_record["peak_trojan_voltage"] = v_trojan
 
             if v_trojan is None:
                 status.update(state=STATE_ERROR)
@@ -223,6 +234,8 @@ def run_equalisation(settings, monitor, status):
 
             time.sleep(30)
 
+        run_record["minutes_at_target"] = round(elapsed / 60, 1)
+
         # Hand back: float-hold, close, guarded teardown.
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -233,10 +246,12 @@ def run_equalisation(settings, monitor, status):
             voltage_delta_max=settings.voltage_delta_max,
             cache_callback=_vm_cache_cb,
         )
+        run_record["reconnect_delta"] = delta
         if not matched:
             status.update(state=STATE_ERROR)
             return False
 
+        run_record["outcome"] = "aborted" if aborted_by_operator else "success"
         status.update(state=STATE_IDLE, time_remaining=0)
         clear_alarm(status_service=status)
         if aborted_by_operator:
@@ -254,6 +269,9 @@ def run_equalisation(settings, monitor, status):
 
     finally:
         t.abort_teardown()
+        run_record["start"] = run_started.isoformat(timespec="seconds")
+        run_record["end"] = datetime.now().isoformat(timespec="seconds")
+        append_run(RUN_HISTORY_FILE, run_record)
 
 
 class FlaEqualisationService:

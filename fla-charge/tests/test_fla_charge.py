@@ -694,5 +694,89 @@ class TestCheckStartsWorker(unittest.TestCase):
             _engine.clear_run_now()
 
 
+class TestRunHistoryRecords(unittest.TestCase):
+    """Mirror of fla-equalisation's TestRunHistoryRecords: every run exit
+    path — success, operator abort, failure — appends one record (#25)."""
+
+    def setUp(self):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl")
+        f.close()
+        os.unlink(f.name)
+        self.path = f.name
+        self.addCleanup(lambda: os.path.exists(self.path) and os.unlink(self.path))
+        patcher = patch('fla_charge.RUN_HISTORY_FILE', self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _records(self):
+        from run_history import read_last
+        return read_last(self.path, 10)
+
+    def _make_mocks(self, **monitor_kwargs):
+        return MockChargeSettings(), MockMonitor(**monitor_kwargs), MockStatus()
+
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.verify_relay_still_open', return_value=True)
+    @patch('fla_charge.write_last_charge')
+    @patch('fla_charge.update_cache')
+    @patch('fla_charge.time')
+    def test_success_appends_a_success_record(self, mock_time, *_):
+        mock_time.time.return_value = 0
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(
+            lfp_soc=96.0, trojan_voltage=30.0, trojan_current=5.0, lfp_voltage=28.0)
+        with patch('fla_charge.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.4)
+            MockT.return_value = inst
+            self.assertTrue(run_charge(settings, monitor, status))
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["outcome"], "success")
+        self.assertEqual(recs[0]["peak_trojan_voltage"], 30.0)
+        self.assertEqual(recs[0]["reconnect_delta"], 0.4)
+
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.update_cache')
+    @patch('fla_charge.time')
+    def test_operator_abort_appends_an_aborted_record(self, mock_time, *_):
+        mock_time.time.return_value = 0
+        mock_time.sleep = MagicMock()
+        # LFP SoC below transition so Phase 1 keeps looping and reaches the
+        # abort check.
+        settings, monitor, status = self._make_mocks(lfp_soc=50.0)
+        with patch('fla_charge.Takeover') as MockT, \
+             patch('fla_charge.check_abort', return_value=True), \
+             patch('fla_charge.clear_abort'):
+            MockT.return_value = MagicMock()
+            self.assertFalse(run_charge(settings, monitor, status))
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["outcome"], "aborted")
+
+    @patch('fla_charge.acquire_lock', return_value=True)
+    @patch('fla_charge.is_ac_available', return_value=True)
+    @patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40)
+    @patch('fla_charge.update_cache')
+    @patch('fla_charge.time')
+    def test_handoff_failure_appends_a_failed_record(self, mock_time, *_):
+        mock_time.time.return_value = 0
+        mock_time.sleep = MagicMock()
+        settings, monitor, status = self._make_mocks(lfp_soc=96.0)
+        with patch('fla_charge.Takeover') as MockT:
+            inst = MagicMock()
+            inst.hand_off_in.return_value = False
+            MockT.return_value = inst
+            self.assertFalse(run_charge(settings, monitor, status))
+        recs = self._records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["outcome"], "failed")
+
+
 if __name__ == '__main__':
     unittest.main()
