@@ -331,18 +331,16 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
     client or test fixture pushing values outside the documented envelope."""
 
     def setUp(self):
-        from fla_charge import FlaChargeService
+        from fla_charge import FlaChargeService, _engine
         self.svc = FlaChargeService.__new__(FlaChargeService)
         self.svc.settings = MagicMock()
-        from web_server import _cache, _pending_settings_lock
-        with _pending_settings_lock:
-            _cache.pop("pending_settings", None)
-        self._cache = _cache
-        self._cache_lock = _pending_settings_lock
+        self._engine = _engine
+        # Make sure no stale pending settings leak in from prior tests.
+        self._engine.drain_pending_settings()
 
     def _enqueue(self, key, value):
-        with self._cache_lock:
-            self._cache.setdefault("pending_settings", []).append((key, value))
+        # Same public path the HTTP POST /api/setting handler uses.
+        self._engine.queue_setting(key, value)
 
     def test_fla_bulk_voltage_above_max_is_rejected(self):
         # Max is 30.5V (per CHARGE_SETTINGS_DEFS). 35V is well above.
@@ -350,8 +348,11 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
         self.svc._apply_pending_settings()
         self.svc.settings._write.assert_not_called()
 
-    def test_unknown_key_is_skipped(self):
-        self._enqueue("not_a_real_setting", 42)
+    def test_unknown_key_is_refused_at_the_queue(self):
+        # The engine validates keys against the profile's schema at queue
+        # time — an unknown key can no longer even enter the pipeline.
+        with self.assertRaises(ValueError):
+            self._enqueue("not_a_real_setting", 42)
         self.svc._apply_pending_settings()
         self.svc.settings._write.assert_not_called()
 

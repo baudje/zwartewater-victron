@@ -34,15 +34,19 @@ from dbus_status_service import (
     STATE_RESTARTING_DRIVER, STATE_ERROR,
 )
 from settings import Settings
-from web_server import (
-    start_web_server,
-    update_cache,
-    check_run_now,
-    check_abort,
-    clear_abort,
-    drain_pending_settings,
-    _cache,
-)
+# One closed engine, configured by this service's Operation profile
+# (ADR-0002). Module-level bindings keep every call site — and the test
+# suite's patch targets — identical to the old per-service web_server.
+from web_engine import WebEngine
+from operation_profile import PROFILE
+
+_engine = WebEngine(PROFILE)
+start_web_server = _engine.start
+update_cache = _engine.update_cache
+check_run_now = _engine.check_run_now
+check_abort = _engine.check_abort
+clear_abort = _engine.clear_abort
+drain_pending_settings = _engine.drain_pending_settings
 from takeover import Takeover, TakeoverStates
 
 CHARGE_TAKEOVER_STATES = TakeoverStates(
@@ -518,7 +522,7 @@ class FlaChargeService:
             if should_run(self.settings, self.monitor):
                 self._running = True
                 self._failed = False
-                _cache["run_now_requested"] = False
+                _engine.clear_run_now()
 
                 def _worker():
                     success = False

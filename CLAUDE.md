@@ -68,6 +68,7 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 | `alerting.py` | Cerbo buzzer activation, D-Bus alarm path |
 | `lock.py` | Atomic file lock (`O_EXCL`) preventing concurrent charge + EQ |
 | `aggregate_driver.py` | Start/stop dbus-aggregate-batteries via `svc -u/-d` |
+| `web_engine.py` | Closed HTTP dashboard engine (page, `/api/*`, CORS + OPTIONS preflight), configured by each service's Operation profile |
 
 ### Service-Specific Components
 
@@ -75,7 +76,7 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - `fla_*.py` — main state machine (entry point)
 - `settings.py` — D-Bus settings registration (accessible from Cerbo GUI/VRM)
 - `dbus_status_service.py` — publishes state, voltages, time remaining to D-Bus
-- `web_server.py` — dashboard UI (8088 for EQ, 8089 for charge)
+- `operation_profile.py` — the Operation profile card (port 8088 EQ / 8089 charge, title, state-label map, settings schema, HTML template) that configures the shared `web_engine.py`
 - `install.sh` — Venus OS installer (daemontools service + rc.local)
 - `service/run` — daemontools runner script
 
@@ -85,7 +86,7 @@ The DVCC handoff sequence (temp battery registration → aggregate stop → syst
 
 ### Duplication that remains intentional
 
-The `_check()` + worker-thread pattern, `web_server.py` infrastructure, `settings.py` base methods, the per-service state enums, scheduling logic, charging phases, and HTML genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (Sharing the web/settings/status scaffolding behind a per-service "operation profile" is a documented follow-up — Candidate 3 of the architecture review — not yet done.)
+The `_check()` + worker-thread pattern, `settings.py` base methods, the per-service state enums, scheduling logic, charging phases, and the dashboard HTML (inside each `operation_profile.py`, per ADR-0002) genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (The web *plumbing* is no longer duplicated: `fla-shared/web_engine.py` is a closed engine configured by each service's Operation profile — Candidate 3 of the architecture review, done. Settings/status scaffolding sharing remains a possible follow-up.)
 
 ## Key Design Decisions
 
@@ -113,10 +114,10 @@ The `_check()` + worker-thread pattern, `web_server.py` infrastructure, `setting
 ## Testing
 
 ```bash
-# Run all tests (240 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 149 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 54 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge service
+# Run all tests (269 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 166 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 60 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 43 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
@@ -160,15 +161,18 @@ sshpass -p "$CERBO_ROOT_PASSWORD" scp fla-shared/*.py root@venus.local:/data/app
 
 # EQ service
 sshpass -p "$CERBO_ROOT_PASSWORD" scp fla-equalisation/fla_equalisation.py fla-equalisation/settings.py \
-  fla-equalisation/dbus_status_service.py fla-equalisation/web_server.py \
+  fla-equalisation/dbus_status_service.py fla-equalisation/operation_profile.py \
   root@venus.local:/data/apps/fla-equalisation/
 
 # Charge service
 sshpass -p "$CERBO_ROOT_PASSWORD" scp fla-charge/fla_charge.py fla-charge/settings.py \
-  fla-charge/dbus_status_service.py fla-charge/web_server.py \
+  fla-charge/dbus_status_service.py fla-charge/operation_profile.py \
   root@venus.local:/data/apps/fla-charge/
 
-# Restart both services
+# Remove the retired per-service web servers (replaced by fla-shared/web_engine.py)
+sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local 'rm -f /data/apps/fla-equalisation/web_server.py /data/apps/fla-charge/web_server.py'
+
+# Restart both services (never while one is mid-operation)
 sshpass -p "$CERBO_ROOT_PASSWORD" ssh root@venus.local 'svc -d /service/fla-equalisation /service/fla-charge && sleep 2 && svc -u /service/fla-equalisation /service/fla-charge'
 ```
 

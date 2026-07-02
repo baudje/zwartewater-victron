@@ -670,21 +670,18 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
 
     def setUp(self):
         # Drive FlaEqualisationService._apply_pending_settings directly
-        # (it only touches self.settings._write and the module-global
+        # (it only touches self.settings._write and the module-bound
         # drain_pending_settings, so we don't need a full service).
-        from fla_equalisation import FlaEqualisationService
+        from fla_equalisation import FlaEqualisationService, _engine
         self.svc = FlaEqualisationService.__new__(FlaEqualisationService)
         self.svc.settings = MagicMock()
-        # Make sure no stale pending_settings leak in from prior tests.
-        from web_server import _cache, _pending_settings_lock
-        with _pending_settings_lock:
-            _cache.pop("pending_settings", None)
-        self._cache = _cache
-        self._cache_lock = _pending_settings_lock
+        self._engine = _engine
+        # Make sure no stale pending settings leak in from prior tests.
+        self._engine.drain_pending_settings()
 
     def _enqueue(self, key, value):
-        with self._cache_lock:
-            self._cache.setdefault("pending_settings", []).append((key, value))
+        # Same public path the HTTP POST /api/setting handler uses.
+        self._engine.queue_setting(key, value)
 
     def test_eq_voltage_above_max_is_rejected(self):
         """31.5V was the cap before it was tightened to 32.0V; either way,
@@ -699,8 +696,11 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
         self.svc._apply_pending_settings()
         self.svc.settings._write.assert_not_called()
 
-    def test_unknown_key_is_skipped(self):
-        self._enqueue("not_a_real_setting", 42)
+    def test_unknown_key_is_refused_at_the_queue(self):
+        # The engine validates keys against the profile's schema at queue
+        # time — an unknown key can no longer even enter the pipeline.
+        with self.assertRaises(ValueError):
+            self._enqueue("not_a_real_setting", 42)
         self.svc._apply_pending_settings()
         self.svc.settings._write.assert_not_called()
 
@@ -712,7 +712,6 @@ class TestApplyPendingSettingsBounds(unittest.TestCase):
     def test_mixed_batch_writes_only_valid_entries(self):
         self._enqueue("eq_voltage", 30.0)        # in range
         self._enqueue("eq_voltage", 99.0)        # out of range — rejected
-        self._enqueue("not_a_real_setting", 1)   # unknown — skipped
         self._enqueue("lfp_soc_min", 90)         # in range
         self.svc._apply_pending_settings()
         # Only the two in-range writes reach _write.
