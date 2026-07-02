@@ -10,6 +10,7 @@ check_run_now, check_abort, clear_abort, drain_pending_settings).
 
 import json
 import os
+import socket
 import sys
 import unittest
 import urllib.request
@@ -190,6 +191,9 @@ class TestCrossOriginControl(ControlTestCase):
         self.assertEqual(resp.headers["Vary"], "Origin")
         self.assertIn("POST", resp.headers["Access-Control-Allow-Methods"])
         self.assertIn("Content-Type", resp.headers["Access-Control-Allow-Headers"])
+        # Cache the preflight so repeated control POSTs skip the extra
+        # round-trip on the single-threaded server.
+        self.assertTrue(int(resp.headers["Access-Control-Max-Age"]) >= 60)
 
     def test_options_preflight_refuses_foreign_origin(self):
         for origin in ("http://evil.example",          # wrong host + port
@@ -237,6 +241,61 @@ class TestCrossOriginControl(ControlTestCase):
         resp = self.get("/api/status")
         self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
 
+    def test_ipv6_literal_origin_is_allowed(self):
+        # Browsing http://[fd00::2]:8088 sends a bracketed Host; the origin
+        # check must compare hostnames, not raw Host-header prefixes, or the
+        # page's own Abort button 403s under IPv6.
+        class FakeReq:
+            headers = {"Origin": "http://[fd00::2]:8089", "Host": "[fd00::2]:8088"}
+        self.assertTrue(self.engine._origin_allowed(FakeReq()))
+
+    def test_foreign_host_still_refused_with_ipv6(self):
+        class FakeReq:
+            headers = {"Origin": "http://[fd00::9]:8089", "Host": "[fd00::2]:8088"}
+        self.assertFalse(self.engine._origin_allowed(FakeReq()))
+
+
+class TestMalformedRequests(EngineHttpTestCase):
+    """A misbehaving LAN client must not be able to stall or crash the
+    single-threaded server that also serves the Abort button."""
+
+    def _raw(self, request_bytes):
+        s = socket.create_connection(self.server.server_address, timeout=5)
+        try:
+            s.sendall(request_bytes)
+            s.settimeout(3)
+            chunks = b""
+            while True:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                chunks += chunk
+            return chunks
+        finally:
+            s.close()
+
+    def test_non_numeric_content_length_gets_json_error(self):
+        resp = self._raw(b"POST /api/setting HTTP/1.1\r\n"
+                         b"Host: 127.0.0.1\r\n"
+                         b"Content-Type: application/json\r\n"
+                         b"Content-Length: abc\r\n\r\n")
+        self.assertIn(b'"ok": false', resp)
+        # The server survives to answer the next request.
+        self.assertEqual(self.get("/api/status").status, 200)
+
+    def test_negative_content_length_does_not_block_the_server(self):
+        # Old behavior: rfile.read(-1) waited for socket EOF, freezing the
+        # dashboard (including Abort) for as long as the client held on.
+        resp = self._raw(b"POST /api/setting HTTP/1.1\r\n"
+                         b"Host: 127.0.0.1\r\n"
+                         b"Content-Type: application/json\r\n"
+                         b"Content-Length: -1\r\n\r\n")
+        self.assertIn(b'"ok": false', resp)
+        self.assertEqual(self.get("/api/status").status, 200)
+
 
 class TestUpdateCacheContract(unittest.TestCase):
     """No HTTP needed — update_cache is the GLib-thread call surface."""
@@ -281,6 +340,24 @@ class TestUpdateCacheContract(unittest.TestCase):
             self.engine.update_cache(trojan_volts=29.6)
 
 
+class TestRunNowMessageHook(ControlTestCase):
+    """A service can put its start-precondition in the run-now reply (the
+    old EQ page told the operator 'SoC must be >= N%'); the hook receives
+    the current settings so the threshold stays live."""
+
+    def setUp(self):
+        self.engine = WebEngine(make_profile(
+            run_now_message=lambda s: "queued (SoC must be >= %d%%)"
+                                      % int(s.get("lfp_soc_min") or 95)))
+        self.server = self.engine.start()
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def test_run_now_reply_uses_the_profile_hook(self):
+        self.engine.update_cache(settings={"lfp_soc_min": 95})
+        resp = self.post("/api/run-now")
+        self.assertIn("SoC must be >= 95%", json.loads(resp.read().decode())["message"])
+
+
 class TestProfileValidation(unittest.TestCase):
     """A profile missing a required field must fail at service startup
     (construction), not when the page or endpoint is first hit."""
@@ -293,6 +370,27 @@ class TestProfileValidation(unittest.TestCase):
     def test_error_state_must_be_a_known_state(self):
         with self.assertRaises(ValueError):
             make_profile(error_state=99)
+
+    def test_error_state_must_be_the_highest_state(self):
+        # The page's abort-button gate is `0 < state < ERROR_STATE`; a state
+        # numbered above error would silently hide Abort while live.
+        with self.assertRaises(ValueError):
+            make_profile(states={0: "Idle", 1: "Busy", 2: "Error", 3: "Later"},
+                         error_state=2)
+
+    def test_alias_targets_must_exist_in_cache_fields(self):
+        # 'Fail at service startup, not when hit': an alias pointing at a
+        # missing cache field must not wait for voltage_matching's callback
+        # to raise mid-hand-back on the worker thread.
+        with self.assertRaises(ValueError) as ctx:
+            WebEngine(make_profile(cache_aliases={"last_eq": "missing_field"}))
+        self.assertIn("missing_field", str(ctx.exception))
+
+    def test_base_alias_targets_are_required_too(self):
+        # The engine's own trojan_v/lfp_v aliases point at trojan_voltage/
+        # lfp_voltage — every profile must carry those fields.
+        with self.assertRaises(ValueError):
+            WebEngine(make_profile(cache_fields={"state": None, "settings": {}}))
 
     def test_template_must_contain_the_placeholders(self):
         # A template without __STATES__ would silently serve a page whose

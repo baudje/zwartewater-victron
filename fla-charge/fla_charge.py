@@ -492,9 +492,8 @@ class FlaChargeService:
         if not pending:
             return
         for key, value in pending:
-            if key not in SETTINGS_DEFS:
-                log.warning("Unknown setting key '%s' — skipped", key)
-                continue
+            # Unknown keys can't reach here: the engine's queue_setting
+            # validates against the profile schema at queue time.
             _, _, minimum, maximum = SETTINGS_DEFS[key]
             if value < minimum or value > maximum:
                 log.warning("Setting %s value %s out of bounds — rejected", key, value)

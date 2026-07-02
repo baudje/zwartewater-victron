@@ -369,9 +369,8 @@ class FlaEqualisationService:
         if not pending:
             return
         for key, value in pending:
-            if key not in SETTINGS_DEFS:
-                log.warning("Unknown setting key '%s' — skipped", key)
-                continue
+            # Unknown keys can't reach here: the engine's queue_setting
+            # validates against the profile schema at queue time.
             _, _, minimum, maximum = SETTINGS_DEFS[key]
             if value < minimum or value > maximum:
                 log.warning("Setting %s value %s out of bounds [%s, %s] — rejected",
@@ -406,7 +405,7 @@ class FlaEqualisationService:
             if should_run(self.settings, self.monitor):
                 self._running = True
                 self._failed = False
-                _cache["run_now_requested"] = False  # CRIT-5: Clear flag after eq starts
+                _engine.clear_run_now()  # discard any queued web RunNow once the run starts
 
                 def _worker():
                     success = False

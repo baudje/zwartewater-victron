@@ -32,8 +32,13 @@ class OperationProfile:
 
     def __init__(self, name, title, port, states, error_state,
                  settings_keys, cache_fields, html_template,
-                 cache_aliases=None, allowed_origin_ports=None):
+                 cache_aliases=None, allowed_origin_ports=None,
+                 run_now_message=None):
         self.cache_aliases = cache_aliases or {}
+        # Optional callable(settings_dict) -> str for the /api/run-now
+        # reply, so a service can name its start precondition (e.g. the EQ
+        # SoC gate) with live threshold values.
+        self.run_now_message = run_now_message
         # Ports whose pages may issue cross-origin control POSTs (the two
         # dashboard ports). Origins on other ports — or other hosts — are
         # refused; see WebEngine._origin_allowed.
@@ -61,6 +66,12 @@ class OperationProfile:
                              % ", ".join(missing))
         if self.error_state not in self.states:
             raise ValueError("error_state %r is not in states" % self.error_state)
+        # The page's abort-button gate is `0 < state < error_state`, so the
+        # error state must be the highest-numbered — a state appended above
+        # it would silently hide Abort while live.
+        if self.error_state != max(self.states):
+            raise ValueError("error_state %r must be the highest state (max is %r)"
+                             % (self.error_state, max(self.states)))
         absent = [p for p in self.REQUIRED_PLACEHOLDERS
                   if p not in self.html_template]
         if absent:
@@ -91,6 +102,12 @@ class WebEngine:
                        for k, v in profile.cache_fields.items()}
         self._aliases = dict(self.CACHE_ALIASES)
         self._aliases.update(profile.cache_aliases)
+        # Fail at service startup, not mid-hand-back on the worker thread:
+        # every alias must point at a real cache field.
+        bad_targets = sorted(t for t in self._aliases.values() if t not in self._cache)
+        if bad_targets:
+            raise ValueError("cache alias targets not in cache_fields: %s"
+                             % ", ".join(bad_targets))
         self._run_now_requested = False
         self._abort_requested = False
         self._pending_settings = []
@@ -170,10 +187,18 @@ class WebEngine:
         try:
             parts = urlsplit(origin)
             origin_port = parts.port or (443 if parts.scheme == "https" else 80)
+            # Parse the Host header the same way (handles IPv6 brackets and
+            # case), instead of naive string splitting.
+            request_host = urlsplit("//" + (req.headers.get("Host") or "")).hostname
         except ValueError:
             return False
-        request_host = (req.headers.get("Host") or "").rsplit(":", 1)[0]
+        # Known residual gap, accepted: DNS rebinding (Origin and Host both
+        # reflect the attacker's rebound name, so they match). Closing it
+        # needs a pinned hostname allowlist, which would break raw-IP
+        # browsing; on this LAN-only, unauthenticated-by-design deployment
+        # the same-host check is the chosen trade-off.
         return (parts.scheme in ("http", "https")
+                and parts.hostname is not None
                 and parts.hostname == request_host
                 and origin_port in self.profile.allowed_origin_ports)
 
@@ -191,13 +216,24 @@ class WebEngine:
             return
         if req.path == "/api/run-now":
             self._run_now_requested = True
-            self._send_json(req, {"message": "RunNow requested — will start at next check"})
+            message = "RunNow requested — will start at next check"
+            if self.profile.run_now_message:
+                try:
+                    message = self.profile.run_now_message(
+                        dict(self._cache.get("settings") or {}))
+                except Exception:
+                    pass  # never let a hook error break the control path
+            self._send_json(req, {"message": message})
         elif req.path == "/api/abort":
             self._abort_requested = True
             self._send_json(req, {"message": "Abort requested — will stop at next check cycle"})
         elif req.path == "/api/setting":
-            length = int(req.headers.get("Content-Length", 0))
             try:
+                # Parse and clamp inside the try: a malformed or negative
+                # Content-Length must yield a JSON error, not an uncaught
+                # exception or an rfile.read(-1) that blocks the single
+                # HTTP thread (and with it the Abort button) until EOF.
+                length = max(0, int(req.headers.get("Content-Length", 0)))
                 data = json.loads(req.rfile.read(length))
                 key, value = data["key"], data["value"]
                 self.queue_setting(key, value)
@@ -261,6 +297,9 @@ class WebEngine:
         self._send_write_cors_headers(req)
         req.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         req.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Let the browser cache the preflight so repeated control POSTs
+        # skip the extra round-trip on this single-threaded server.
+        req.send_header("Access-Control-Max-Age", "600")
         req.end_headers()
 
     def _send_json(self, req, payload, read_only=False):

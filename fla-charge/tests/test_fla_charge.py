@@ -652,5 +652,47 @@ class TestChargeResumeOnStartup(unittest.TestCase):
         mock_safety.assert_called_once()
 
 
+class TestCheckStartsWorker(unittest.TestCase):
+    """Mirror of fla-equalisation's TestCheckStartsWorker: _check()'s
+    should-run branch must spawn the worker without tripping on the web
+    engine surface (the EQ side shipped a leftover `_cache[...]` reference
+    that NameError'd here after `self._running = True`, wedging the
+    service; this pins the charge side against the same drift)."""
+
+    def _service(self):
+        from fla_charge import FlaChargeService
+        svc = FlaChargeService.__new__(FlaChargeService)
+        svc.settings = MagicMock()
+        svc.monitor = MagicMock()
+        svc.status = MagicMock()
+        svc._running = False
+        svc._failed = False
+        # Idle-status refresh reads live D-Bus values — not under test here.
+        svc._update_idle_status = lambda: None
+        return svc
+
+    @patch('fla_charge.threading.Thread')
+    @patch('fla_charge.should_run', return_value=True)
+    def test_should_run_branch_spawns_the_worker(self, _sr, mock_thread):
+        svc = self._service()
+        svc._check()
+        mock_thread.assert_called_once()
+        mock_thread.return_value.start.assert_called_once()
+        self.assertTrue(svc._running)
+
+    @patch('fla_charge.threading.Thread')
+    @patch('fla_charge.should_run', return_value=True)
+    def test_web_run_now_flag_is_cleared_when_run_starts(self, _sr, mock_thread):
+        from fla_charge import _engine
+        svc = self._service()
+        _engine._run_now_requested = True  # queued via web while conditions align
+        try:
+            svc._check()
+            self.assertFalse(_engine.check_run_now(),
+                             "queued web RunNow must be discarded once a run starts")
+        finally:
+            _engine.clear_run_now()
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -86,7 +86,7 @@ The DVCC handoff sequence (temp battery registration → aggregate stop → syst
 
 ### Duplication that remains intentional
 
-The `_check()` + worker-thread pattern, `settings.py` base methods, the per-service state enums, scheduling logic, charging phases, and the dashboard HTML (inside each `operation_profile.py`, per ADR-0002) genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (The web *plumbing* is no longer duplicated: `fla-shared/web_engine.py` is a closed engine configured by each service's Operation profile — Candidate 3 of the architecture review, done. Settings/status scaffolding sharing remains a possible follow-up.)
+The `_check()` + worker-thread pattern, `settings.py` base methods, the per-service state enums, scheduling logic, charging phases, and the dashboard HTML (inside each `operation_profile.py`, per ADR-0002) genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (The web *plumbing* is no longer duplicated: `fla-shared/web_engine.py` is a closed engine configured by each service's Operation profile — the web third of Candidate 3 of the architecture review. The settings and status scaffolding thirds of Candidate 3 are still per-service and remain a documented follow-up; CONTEXT.md's "Operation profile" glossary entry describes the full target card, which the code does not yet fully implement.)
 
 ## Key Design Decisions
 
@@ -114,10 +114,10 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (275 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 170 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 61 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 44 tests — charge service
+# Run all tests (287 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 178 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 63 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 46 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v

@@ -200,5 +200,10 @@ PROFILE = OperationProfile(
         "settings": {},
     },
     cache_aliases={"last_eq": "last_equalisation", "days_until": "days_until_next"},
+    # Name the start precondition in the run-now reply (with the live
+    # threshold), so curl/scripted callers learn why a run may not start.
+    run_now_message=lambda s: (
+        "RunNow requested — will start at next check (SoC must be >= %d%%)"
+        % int(s.get("lfp_soc_min") or 95)),
     html_template=HTML_TEMPLATE,
 )
