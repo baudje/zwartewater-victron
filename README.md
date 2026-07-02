@@ -271,16 +271,16 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 ## Testing
 
 ```bash
-# Run all tests (292 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 183 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 63 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 46 tests — charge service
+# Run all tests (303 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 192 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 64 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 47 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-292 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract incl. live-SoC publishing, the Takeover handoff/teardown/resume sequence incl. abort-aware discovery waits and abort-vs-timeout disambiguation, and the shared web engine incl. CORS/preflight and Operation-profile validation), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
+303 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract incl. live-SoC publishing, the Takeover handoff/teardown/resume sequence incl. abort-aware discovery waits and abort-vs-timeout disambiguation, and the shared web engine incl. CORS/preflight and Operation-profile validation), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
 
 ## Files
 
@@ -309,7 +309,8 @@ zwartewater-victron/
 |   +-- aggregate_driver.py         # Start/stop aggregate batteries
 |   +-- web_engine.py                # Shared dashboard engine (closed, profile-configured)
 |   +-- unified_page.py              # The unified dashboard page (identical at both ports)
-|   +-- tests/                      # 183 unit tests for shared modules
+|   +-- log_tail.py                  # Bounded log-file tail for the log card
+|   +-- tests/                      # 192 unit tests for shared modules
 +-- fla-equalisation/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
@@ -318,7 +319,7 @@ zwartewater-victron/
 |   +-- settings.py                 # Venus OS settings integration
 |   +-- operation_profile.py        # Operation profile (declarative card, port 8088)
 |   +-- service/run                 # Daemontools service runner
-|   +-- tests/                      # 63 unit tests
+|   +-- tests/                      # 64 unit tests
 +-- fla-charge/
     +-- install.sh                  # Venus OS installer
     +-- fla_charge.py               # Main charge service
@@ -326,7 +327,7 @@ zwartewater-victron/
     +-- settings.py                 # Venus OS settings integration
     +-- operation_profile.py        # Operation profile (declarative card, port 8089)
     +-- service/run                 # Daemontools service runner
-    +-- tests/                      # 46 unit tests
+    +-- tests/                      # 47 unit tests
 ```
 
 ## References

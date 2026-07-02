@@ -69,6 +69,7 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 | `lock.py` | Atomic file lock (`O_EXCL`) preventing concurrent charge + EQ |
 | `aggregate_driver.py` | Start/stop dbus-aggregate-batteries via `svc -u/-d` |
 | `web_engine.py` | Closed HTTP dashboard engine (`/api/status`, `/api/config`, control POSTs, origin-validated CORS), configured by each service's Operation profile |
+| `log_tail.py` | Bounded (line- and byte-capped) log tail behind `GET /api/log` |
 | `unified_page.py` | THE dashboard page — one shared data-driven HTML/JS asset served identically at 8088 and 8089; renders both operations' panels from each service's `/api/config` |
 
 ### Service-Specific Components
@@ -115,10 +116,10 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (292 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 183 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 63 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 46 tests — charge service
+# Run all tests (303 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 192 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 64 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 47 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
