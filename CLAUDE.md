@@ -113,9 +113,9 @@ The `_check()` + worker-thread pattern, `web_server.py` infrastructure, `setting
 ## Testing
 
 ```bash
-# Run all tests (184 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 96 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 51 tests — EQ service
+# Run all tests (240 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 149 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 54 tests — EQ service
 python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge service
 
 # Run a single test file
