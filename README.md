@@ -120,9 +120,9 @@ Common code shared between both services:
 | `relay_control.py` | Relay open/close with read-back verification, safe-hold cleanup, startup recovery |
 | `voltage_matching.py` | Convergence loop — waits for delta <= 1V before reconnect |
 | `temp_battery.py` | Subprocess manager for temporary D-Bus battery service |
-| `temp_battery_process.py` | Standalone D-Bus battery service (runs as subprocess) |
+| `temp_battery_process.py` | Standalone D-Bus battery service (runs as subprocess); mirrors the Trojan SmartShunt's voltage/current/SoC so DVCC always has a valid monitor during a takeover |
 | `temp_compensation.py` | Trojan L16H-AC temperature compensation (±0.005V/cell/°C) |
-| `dbus_monitor.py` | SmartShunt readings, relay state, DVCC settings |
+| `dbus_monitor.py` | SmartShunt readings, relay state, DVCC settings; systemcalc restart with abort-aware, generously-timed service-discovery waits and per-call read timeouts |
 | `alerting.py` | Cerbo buzzer + D-Bus alarm |
 | `lock.py` | Atomic file-based lock (prevents concurrent charge + EQ) |
 | `aggregate_driver.py` | Start/stop dbus-aggregate-batteries |
@@ -254,6 +254,9 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 | **Safe-hold reconnect** | Any exit with the relay still open | Relay closes only when delta <= 1V and read-back verified; otherwise the bus is held on the temp battery and an alarm is raised. No high-delta auto-close, and DVCC is never torn down while the LFP is isolated |
 | **DVCC originals snapshot** | Every operation | Real pre-operation DVCC settings (BatteryService / BmsInstance / MaxChargeVoltage) snapshotted and persisted before handoff, then restored on completion or resume — never hardcoded defaults |
 | **Resume on startup** | Service restart mid-reconnect (relay open + temp battery alive) | Adopts the in-flight Takeover and finishes the hand-back, restoring DVCC from the persisted snapshot; if the snapshot is lost, holds and alarms rather than guessing |
+| **Congestion-tolerant discovery** | systemcalc restart on Venus OS v3.80~33 | Waits up to 300s for `com.victronenergy.system` and up to 120s for the temp battery (instance 100) to appear — the slow post-restart D-Bus scan congests the bus; each D-Bus read is bounded to 5s so a half-dead service can't stall a poll. The temp battery holds a safe CVL throughout |
+| **Abort-aware handoff** | Operator Abort during the pre-relay waits | The multi-minute systemcalc and discovery waits poll the Abort flag and reconnect cleanly with **no alarm** — an Abort can no longer run on to open the relay after it was pressed to prevent the disconnect |
+| **Valid SoC during takeover** | Temp battery is DVCC's active monitor | Mirrors the Trojan SmartShunt's SoC so the Quattro never reads an empty SoC — which otherwise raised a spurious Low Battery alarm for the whole handoff even with both banks full |
 | **Relay verification** | After every relay command | Reads back state; aborts if mismatch. Unreadable LFP current after open also aborts |
 | **Orion failure detection** | LFP voltage drops > 0.5V during EQ/charge | Aborts and reconnects |
 | **Temperature compensation** | Every charge cycle | Adjusts voltages per Trojan datasheet (±0.06V/°C from 25°C) |
@@ -268,8 +271,8 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 ## Testing
 
 ```bash
-# Run all tests (232 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 141 tests — shared modules
+# Run all tests (240 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 149 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 54 tests — EQ service
 python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge service
 
@@ -277,7 +280,7 @@ python3 -m unittest discover -s fla-charge/tests -v        # 37 tests — charge
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-232 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract, and the Takeover handoff/teardown/resume sequence), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
+240 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract incl. live-SoC publishing, and the Takeover handoff/teardown/resume sequence incl. abort-aware discovery waits and abort-vs-timeout disambiguation), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
 
 ## Files
 
