@@ -38,10 +38,14 @@ class OperationProfile:
     def __init__(self, name, title, port, states, error_state,
                  settings_keys, cache_fields, settings_rows, panel_fields,
                  cache_aliases=None, allowed_origin_ports=None,
-                 run_now_message=None, run_now_confirm=None, log_file=None):
+                 run_now_message=None, run_now_confirm=None, log_file=None,
+                 run_history_file=None):
         # Optional path to this service's log; served (tail only, bounded)
         # via GET /api/log for the dashboard's log card.
         self.log_file = log_file
+        # Optional path to this service's run-history JSONL; served via
+        # GET /api/runs for the dashboard's runs table.
+        self.run_history_file = run_history_file
         self.cache_aliases = cache_aliases or {}
         # Optional callable(settings_dict) -> str for the /api/run-now
         # reply, so a service can name its start precondition (e.g. the EQ
@@ -205,6 +209,8 @@ class WebEngine:
             self._send_json(req, self.profile.config(), read_only=True)
         elif req.path == "/api/log" or req.path.startswith("/api/log?"):
             self._send_json(req, {"lines": self._log_lines(req.path)}, read_only=True)
+        elif req.path == "/api/runs" or req.path.startswith("/api/runs?"):
+            self._send_json(req, {"runs": self._runs(req.path)}, read_only=True)
         else:
             req.send_response(404)
             req.end_headers()
@@ -333,16 +339,32 @@ class WebEngine:
         if not self.profile.log_file:
             return []
         from log_tail import tail
-        lines = self.LOG_LINES_DEFAULT
+        lines = max(1, min(self._query_int(path, "lines", self.LOG_LINES_DEFAULT),
+                           self.LOG_LINES_MAX))
+        return tail(self.profile.log_file, lines=lines)
+
+    RUNS_DEFAULT = 10
+    RUNS_MAX = 50
+
+    def _runs(self, path):
+        """Recent run records (empty when no history file is configured)."""
+        if not self.profile.run_history_file:
+            return []
+        from run_history import read_last
+        limit = self._query_int(path, "limit", self.RUNS_DEFAULT)
+        return read_last(self.profile.run_history_file,
+                         max(1, min(limit, self.RUNS_MAX)))
+
+    @staticmethod
+    def _query_int(path, name, default):
         query = urlsplit(path).query
         for part in query.split("&"):
-            if part.startswith("lines="):
+            if part.startswith(name + "="):
                 try:
-                    lines = int(part[len("lines="):])
+                    return int(part[len(name) + 1:])
                 except ValueError:
                     pass
-        lines = max(1, min(lines, self.LOG_LINES_MAX))
-        return tail(self.profile.log_file, lines=lines)
+        return default
 
     def _handle_options(self, req):
         """CORS preflight for the cross-port control POSTs. Only origins on

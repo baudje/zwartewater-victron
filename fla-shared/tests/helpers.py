@@ -188,6 +188,10 @@ class ProfileContractMixin:
         self.assertEqual(self.PROFILE.log_file,
                          "/data/log/%s.log" % self.EXPECTED_NAME)
 
+    def test_run_history_file_is_on_the_data_partition(self):
+        self.assertEqual(self.PROFILE.run_history_file,
+                         "/data/apps/%s/run-history.jsonl" % self.EXPECTED_NAME)
+
     def test_old_web_server_module_is_gone(self):
         import os
         self.assertFalse(

@@ -59,6 +59,7 @@ for f in \
     web_engine.py \
     unified_page.py \
     log_tail.py \
+    run_history.py \
 ; do
     wget -qO "${SHARED_DIR}/${f}" "${SHARED_URL}/${f}"
     echo "  ${f}"

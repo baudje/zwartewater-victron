@@ -61,6 +61,13 @@ UNIFIED_TEMPLATE = """<!DOCTYPE html>
     letter-spacing: 1px; cursor: pointer; }
   pre.log { font-size: 0.72em; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
     color: #9fb3c8; max-height: 260px; overflow-y: auto; margin-top: 8px; }
+  table.runs { width: 100%; border-collapse: collapse; font-size: 0.78em; }
+  table.runs th { color: #8899aa; text-align: left; font-weight: 400; padding: 3px 4px;
+    border-bottom: 1px solid #253546; }
+  table.runs td { padding: 3px 4px; border-bottom: 1px solid #1e2c3c; color: #cfd9e4; }
+  td.outcome-success { color: #4caf50; }
+  td.outcome-aborted { color: #ff9800; }
+  td.outcome-failed { color: #f44336; }
 </style>
 </head>
 <body>
@@ -125,6 +132,9 @@ function buildPanel(port) {
        '<button class="btn" id="run_'+port+'">Run Now</button> ' +
        '<button class="btn abort" id="abort_'+port+'" style="display:none">Abort</button>' +
        '<span class="msg" id="msg_'+port+'"></span></div>';
+  h += '<div class="card"><h2>Recent runs</h2><table class="runs">' +
+       '<thead><tr><th>Start</th><th>Outcome</th><th>Peak V</th><th>At target</th><th>Delta</th></tr></thead>' +
+       '<tbody id="runs_'+port+'"><tr><td colspan="5">-</td></tr></tbody></table></div>';
   h += '<div class="card"><details class="logbox" id="logbox_'+port+'">' +
        '<summary>Log</summary><pre class="log" id="log_'+port+'">-</pre></details></div>';
   d.innerHTML = h;
@@ -171,6 +181,25 @@ function renderPanel(port) {
     });
   }
   el("abort_"+port).style.display = (d.state>0 && d.state<cfg.error_state) ? "inline-block" : "none";
+}
+
+function esc(t) { var d=document.createElement("span"); d.textContent=t==null?"-":String(t); return d.innerHTML; }
+
+function refreshRuns(port) {
+  if (!SVC[port].reachable) return;
+  fetch(base(port)+"/api/runs?limit=8").then(function(r){ return r.json(); })
+    .then(function(d){
+      var tb = el("runs_"+port);
+      if (!tb) return;
+      if (!d.runs.length) { tb.innerHTML = '<tr><td colspan="5">No runs recorded yet</td></tr>'; return; }
+      tb.innerHTML = d.runs.map(function(r){
+        return '<tr><td>'+esc(r.start ? r.start.replace("T"," ") : "-")+'</td>' +
+               '<td class="outcome-'+esc(r.outcome)+'">'+esc(r.outcome)+'</td>' +
+               '<td>'+(r.peak_trojan_voltage!=null ? esc(parseFloat(r.peak_trojan_voltage).toFixed(2))+" V" : "-")+'</td>' +
+               '<td>'+(r.minutes_at_target!=null ? esc(r.minutes_at_target)+" min" : "-")+'</td>' +
+               '<td>'+(r.reconnect_delta!=null ? esc(parseFloat(r.reconnect_delta).toFixed(2))+" V" : "-")+'</td></tr>';
+      }).join("");
+    }).catch(function(){});
 }
 
 function refreshLog(port) {
@@ -228,6 +257,7 @@ function doAbort(port) {
     .catch(function(){ el("msg_"+port).textContent = "request failed"; });
 }
 
+var cycle = 0;
 function refresh() {
   var pending = PORTS.map(function(port){
     var chain = SVC[port].cfg ? Promise.resolve() : loadConfig(port);
@@ -235,7 +265,10 @@ function refresh() {
       return fetch(base(port)+"/api/status").then(function(r){ return r.json(); })
         .then(function(d){ SVC[port].status = d; SVC[port].reachable = true; });
     }).catch(function(){ SVC[port].reachable = false; })
-      .then(function(){ renderPanel(port); refreshLog(port); });
+      .then(function(){
+        renderPanel(port); refreshLog(port);
+        if (cycle % 12 === 0) refreshRuns(port);
+      });
   });
   Promise.all(pending).then(function(){
     renderHeader();
@@ -244,6 +277,7 @@ function refresh() {
       ? "Updated " + new Date().toLocaleTimeString()
       : "Both services unreachable — retrying…";
     initialLoad = false;
+    cycle++;
   });
 }
 

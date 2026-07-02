@@ -24,6 +24,7 @@ from dbus_monitor import DbusMonitor
 from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
 from relay_control import verify_relay_still_open, startup_safety_check
 from lock import acquire as acquire_lock, release as release_lock
+from run_history import append_run
 from temp_compensation import compensate as temp_compensate
 import alerting
 
@@ -66,6 +67,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 LAST_CHARGE_FILE = "/data/apps/fla-charge/last_charge"
+# One JSON line per finished run (success/aborted/failed) — issue #25.
+RUN_HISTORY_FILE = "/data/apps/fla-charge/run-history.jsonl"
 CHECK_INTERVAL_SEC = 60
 
 
@@ -172,6 +175,10 @@ def run_charge(settings, monitor, status):
         log.info("Operation lock held — skipping")
         return False
 
+    run_started = datetime.now()
+    # Written on EVERY exit path (finally); outcome upgraded on the way out.
+    run_record = {"outcome": "failed", "peak_trojan_voltage": None,
+                  "minutes_at_target": None, "reconnect_delta": None}
     t = Takeover(monitor, status, alerting, "fla-charge", CHARGE_TAKEOVER_STATES,
                  should_abort=check_abort)
     try:
@@ -231,6 +238,7 @@ def run_charge(settings, monitor, status):
             if check_abort():
                 log.warning("Abort requested via web UI during Phase 1")
                 clear_abort()
+                run_record["outcome"] = "aborted"
                 status.update(state=STATE_ERROR)
                 alerting.raise_alarm("FLA charge aborted by operator", status_service=status)
                 return False
@@ -270,6 +278,10 @@ def run_charge(settings, monitor, status):
             v_trojan = monitor.get_trojan_voltage()
             i_trojan = monitor.get_trojan_current()
             v_lfp = monitor.get_lfp_voltage()
+
+            if v_trojan is not None and (run_record["peak_trojan_voltage"] is None
+                                          or v_trojan > run_record["peak_trojan_voltage"]):
+                run_record["peak_trojan_voltage"] = v_trojan
 
             current_state = STATE_PHASE3_ABSORPTION if elapsed > 300 else STATE_PHASE2_BULK
             delta = round(abs(v_trojan - v_lfp), 2) if (v_trojan is not None and v_lfp is not None) else None
@@ -347,6 +359,8 @@ def run_charge(settings, monitor, status):
 
             time.sleep(30)
 
+        run_record["minutes_at_target"] = round(elapsed / 60, 1)
+
         # === PHASE 4: Hand back — float-hold, voltage-match, close, teardown ===
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -362,10 +376,12 @@ def run_charge(settings, monitor, status):
             voltage_delta_max=settings.voltage_delta_max,
             cache_callback=_vm_cache_cb,
         )
+        run_record["reconnect_delta"] = delta
         if not matched:
             status.update(state=STATE_ERROR)
             return False
 
+        run_record["outcome"] = "aborted" if aborted_by_operator else "success"
         status.update(state=STATE_IDLE, time_remaining=0)
         alerting.clear_alarm(status_service=status)
         if aborted_by_operator:
@@ -383,6 +399,9 @@ def run_charge(settings, monitor, status):
 
     finally:
         t.abort_teardown()
+        run_record["start"] = run_started.isoformat(timespec="seconds")
+        run_record["end"] = datetime.now().isoformat(timespec="seconds")
+        append_run(RUN_HISTORY_FILE, run_record)
 
 
 class FlaChargeService:
