@@ -57,6 +57,10 @@ UNIFIED_TEMPLATE = """<!DOCTYPE html>
   .badge.down { background: #4a1010; color: #ff9d9d; }
   .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .msg { margin-left: 8px; color: #8899aa; font-size: 0.85em; }
+  details.logbox summary { color: #8bb4d9; font-size: 0.85em; text-transform: uppercase;
+    letter-spacing: 1px; cursor: pointer; }
+  pre.log { font-size: 0.72em; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+    color: #9fb3c8; max-height: 260px; overflow-y: auto; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -121,6 +125,8 @@ function buildPanel(port) {
        '<button class="btn" id="run_'+port+'">Run Now</button> ' +
        '<button class="btn abort" id="abort_'+port+'" style="display:none">Abort</button>' +
        '<span class="msg" id="msg_'+port+'"></span></div>';
+  h += '<div class="card"><details class="logbox" id="logbox_'+port+'">' +
+       '<summary>Log</summary><pre class="log" id="log_'+port+'">-</pre></details></div>';
   d.innerHTML = h;
   el("panels").appendChild(d);
 
@@ -165,6 +171,15 @@ function renderPanel(port) {
     });
   }
   el("abort_"+port).style.display = (d.state>0 && d.state<cfg.error_state) ? "inline-block" : "none";
+}
+
+function refreshLog(port) {
+  // Only fetch when the operator has the log card open — no idle cost.
+  var box = el("logbox_"+port);
+  if (!box || !box.open || !SVC[port].reachable) return;
+  fetch(base(port)+"/api/log?lines=50").then(function(r){ return r.json(); })
+    .then(function(d){ el("log_"+port).textContent = d.lines.length ? d.lines.join("\\n") : "(log empty)"; })
+    .catch(function(){});
 }
 
 function renderHeader() {
@@ -220,7 +235,7 @@ function refresh() {
       return fetch(base(port)+"/api/status").then(function(r){ return r.json(); })
         .then(function(d){ SVC[port].status = d; SVC[port].reachable = true; });
     }).catch(function(){ SVC[port].reachable = false; })
-      .then(function(){ renderPanel(port); });
+      .then(function(){ renderPanel(port); refreshLog(port); });
   });
   Promise.all(pending).then(function(){
     renderHeader();

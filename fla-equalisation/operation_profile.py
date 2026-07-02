@@ -23,6 +23,7 @@ PROFILE = OperationProfile(
     states=STATE_NAMES,
     error_state=STATE_ERROR,
     settings_keys=list(SETTINGS_DEFS),
+    log_file="/data/log/fla-equalisation.log",
     # Cross-origin control is limited to pages served by the Cerbo itself:
     # this dashboard and its peer (fla-charge on 8089).
     allowed_origin_ports=[8088, 8089],

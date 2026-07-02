@@ -58,6 +58,7 @@ for f in \
     takeover.py \
     web_engine.py \
     unified_page.py \
+    log_tail.py \
 ; do
     wget -qO "${SHARED_DIR}/${f}" "${SHARED_URL}/${f}"
     echo "  ${f}"

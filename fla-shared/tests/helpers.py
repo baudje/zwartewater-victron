@@ -183,6 +183,11 @@ class ProfileContractMixin:
         self.assertEqual(set(cfg["states"].keys()),
                          {str(k) for k in self.PROFILE.states})
 
+    def test_log_file_points_at_the_service_log(self):
+        # The dashboard log card tails this path on the Cerbo.
+        self.assertEqual(self.PROFILE.log_file,
+                         "/data/log/%s.log" % self.EXPECTED_NAME)
+
     def test_old_web_server_module_is_gone(self):
         import os
         self.assertFalse(

@@ -81,6 +81,7 @@ class TestServesDashboardPage(EngineHttpTestCase):
         self.assertIn("[8088, 8089]", body)
         self.assertIn("/api/config", body)
         self.assertIn("/api/status", body)
+        self.assertIn("/api/log", body)
         self.assertNotIn("__PORTS__", body)
 
     def test_page_is_identical_regardless_of_profile(self):
@@ -379,6 +380,42 @@ class TestUpdateCacheContract(unittest.TestCase):
         # publish a key the page never reads.
         with self.assertRaises(ValueError):
             self.engine.update_cache(trojan_volts=29.6)
+
+
+class TestLogEndpoint(EngineHttpTestCase):
+    def setUp(self):
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", delete=False, suffix=".log")
+        f.write("".join("entry %d\n" % i for i in range(300)))
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        self.engine = WebEngine(make_profile(log_file=f.name))
+        self.server = self.engine.start()
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def test_log_returns_last_lines_with_cors(self):
+        resp = self.get("/api/log?lines=5")
+        self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
+        data = json.loads(resp.read().decode())
+        self.assertEqual(data["lines"], ["entry %d" % i for i in range(295, 300)])
+
+    def test_requested_lines_are_capped_server_side(self):
+        data = json.loads(self.get("/api/log?lines=999999").read().decode())
+        self.assertLessEqual(len(data["lines"]), 200)
+
+    def test_default_without_query(self):
+        data = json.loads(self.get("/api/log").read().decode())
+        self.assertEqual(len(data["lines"]), 50)
+
+    def test_profile_without_log_file_yields_empty(self):
+        engine = WebEngine(make_profile())  # no log_file
+        server = engine.start()
+        try:
+            url = "http://127.0.0.1:%d/api/log" % server.server_address[1]
+            data = json.loads(urllib.request.urlopen(url, timeout=5).read().decode())
+            self.assertEqual(data["lines"], [])
+        finally:
+            server.shutdown()
 
 
 class TestRunNowMessageHook(ControlTestCase):

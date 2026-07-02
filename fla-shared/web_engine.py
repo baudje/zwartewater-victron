@@ -38,7 +38,10 @@ class OperationProfile:
     def __init__(self, name, title, port, states, error_state,
                  settings_keys, cache_fields, settings_rows, panel_fields,
                  cache_aliases=None, allowed_origin_ports=None,
-                 run_now_message=None, run_now_confirm=None):
+                 run_now_message=None, run_now_confirm=None, log_file=None):
+        # Optional path to this service's log; served (tail only, bounded)
+        # via GET /api/log for the dashboard's log card.
+        self.log_file = log_file
         self.cache_aliases = cache_aliases or {}
         # Optional callable(settings_dict) -> str for the /api/run-now
         # reply, so a service can name its start precondition (e.g. the EQ
@@ -200,6 +203,8 @@ class WebEngine:
             self._send_json(req, self._cache, read_only=True)
         elif req.path == "/api/config":
             self._send_json(req, self.profile.config(), read_only=True)
+        elif req.path == "/api/log" or req.path.startswith("/api/log?"):
+            self._send_json(req, {"lines": self._log_lines(req.path)}, read_only=True)
         else:
             req.send_response(404)
             req.end_headers()
@@ -319,6 +324,25 @@ class WebEngine:
         with self._pending_settings_lock:
             pending, self._pending_settings = self._pending_settings, []
         return pending
+
+    LOG_LINES_DEFAULT = 50
+    LOG_LINES_MAX = 200
+
+    def _log_lines(self, path):
+        """Bounded tail of the service log (empty when none is configured)."""
+        if not self.profile.log_file:
+            return []
+        from log_tail import tail
+        lines = self.LOG_LINES_DEFAULT
+        query = urlsplit(path).query
+        for part in query.split("&"):
+            if part.startswith("lines="):
+                try:
+                    lines = int(part[len("lines="):])
+                except ValueError:
+                    pass
+        lines = max(1, min(lines, self.LOG_LINES_MAX))
+        return tail(self.profile.log_file, lines=lines)
 
     def _handle_options(self, req):
         """CORS preflight for the cross-port control POSTs. Only origins on
