@@ -25,20 +25,28 @@ class OperationProfile:
     """Declarative card describing one FLA operation's web identity.
 
     See CONTEXT.md ("Operation profile"): the genuinely-varying parts stay
-    per-service in this card; the engine is closed over it.
+    per-service in this card; the engine is closed over it. Since the
+    unified dashboard, the page itself is SHARED (fla-shared/unified_page.py)
+    and fully data-driven: this card's settings_rows/panel_fields/states are
+    served via GET /api/config and rendered by the page at runtime, so
+    nothing per-service can leak into (or drift inside) the HTML.
     """
 
-    REQUIRED_PLACEHOLDERS = ("__TITLE__", "__STATES__", "__ERROR_STATE__")
+    # Value-format names the unified page's JS knows how to render.
+    PANEL_FORMATS = ("v", "a", "pct", "days_or_due", "text")
 
     def __init__(self, name, title, port, states, error_state,
-                 settings_keys, cache_fields, html_template,
+                 settings_keys, cache_fields, settings_rows, panel_fields,
                  cache_aliases=None, allowed_origin_ports=None,
-                 run_now_message=None):
+                 run_now_message=None, run_now_confirm=None):
         self.cache_aliases = cache_aliases or {}
         # Optional callable(settings_dict) -> str for the /api/run-now
         # reply, so a service can name its start precondition (e.g. the EQ
         # SoC gate) with live threshold values.
         self.run_now_message = run_now_message
+        # Optional browser confirm() text for the Run Now button; may embed
+        # {setting_key} placeholders the page fills from live settings.
+        self.run_now_confirm = run_now_confirm
         # Ports whose pages may issue cross-origin control POSTs (the two
         # dashboard ports). Origins on other ports — or other hosts — are
         # refused; see WebEngine._origin_allowed.
@@ -50,17 +58,25 @@ class OperationProfile:
         self.error_state = error_state
         self.settings_keys = settings_keys
         self.cache_fields = cache_fields
-        self.html_template = html_template
+        # Editable settings shown on this operation's panel:
+        # {key, label, unit, type} with type "f" (float), "i" (int) or
+        # "b" (yes/no select stored as int).
+        self.settings_rows = settings_rows
+        # Extra status rows shown on this operation's panel:
+        # {key: cache field, label, format: one of PANEL_FORMATS}.
+        self.panel_fields = panel_fields
         self._validate()
 
     def _validate(self):
         """Fail at service startup, not when a page or endpoint is hit."""
         missing = [field for field in ("name", "title", "states",
                                        "settings_keys", "cache_fields",
-                                       "html_template")
+                                       "settings_rows")
                    if not getattr(self, field)]
         if self.port is None:
             missing.append("port")
+        if self.panel_fields is None:
+            missing.append("panel_fields")
         if missing:
             raise ValueError("OperationProfile missing required fields: %s"
                              % ", ".join(missing))
@@ -72,23 +88,34 @@ class OperationProfile:
         if self.error_state != max(self.states):
             raise ValueError("error_state %r must be the highest state (max is %r)"
                              % (self.error_state, max(self.states)))
-        absent = [p for p in self.REQUIRED_PLACEHOLDERS
-                  if p not in self.html_template]
-        if absent:
-            raise ValueError("html_template lacks placeholders: %s"
-                             % ", ".join(absent))
+        bad_rows = [r["key"] for r in self.settings_rows
+                    if r["key"] not in self.settings_keys]
+        if bad_rows:
+            raise ValueError("settings_rows keys not in settings schema: %s"
+                             % ", ".join(bad_rows))
+        bad_fields = [f["key"] for f in self.panel_fields
+                      if f["key"] not in self.cache_fields]
+        if bad_fields:
+            raise ValueError("panel_fields keys not in cache_fields: %s"
+                             % ", ".join(bad_fields))
+        bad_formats = [f["format"] for f in self.panel_fields
+                       if f["format"] not in self.PANEL_FORMATS]
+        if bad_formats:
+            raise ValueError("unknown panel_fields formats: %s (known: %s)"
+                             % (", ".join(bad_formats), ", ".join(self.PANEL_FORMATS)))
 
-    def render_page(self):
-        """Substitute the profile's data into its HTML template so the
-        page's states/title can never drift from the service's own maps."""
-        # ensure_ascii=False: labels contain non-ASCII (em-dash) and the
-        # page is served as UTF-8.
-        states_json = json.dumps({str(k): v for k, v in self.states.items()},
-                                 ensure_ascii=False)
-        return (self.html_template
-                .replace("__TITLE__", self.title)
-                .replace("__STATES__", states_json)
-                .replace("__ERROR_STATE__", str(self.error_state)))
+    def config(self):
+        """The JSON-safe card the unified page renders a panel from."""
+        return {
+            "name": self.name,
+            "title": self.title,
+            "port": self.port,
+            "states": {str(k): v for k, v in self.states.items()},
+            "error_state": self.error_state,
+            "settings_rows": self.settings_rows,
+            "panel_fields": self.panel_fields,
+            "run_now_confirm": self.run_now_confirm,
+        }
 
 
 class WebEngine:
@@ -96,7 +123,11 @@ class WebEngine:
 
     def __init__(self, profile):
         self.profile = profile
-        self._page = profile.render_page()
+        # The SAME page is served at both ports; it discovers each panel's
+        # content from /api/config at runtime. Only the port list (shared
+        # by both profiles) is baked in.
+        from unified_page import render_unified_page
+        self._page = render_unified_page(sorted(profile.allowed_origin_ports))
         # Per-instance copy so two engines in one process never share state.
         self._cache = {k: (dict(v) if isinstance(v, dict) else v)
                        for k, v in profile.cache_fields.items()}
@@ -167,6 +198,8 @@ class WebEngine:
             req.wfile.write(self._page.encode())
         elif req.path == "/api/status":
             self._send_json(req, self._cache, read_only=True)
+        elif req.path == "/api/config":
+            self._send_json(req, self.profile.config(), read_only=True)
         else:
             req.send_response(404)
             req.end_headers()

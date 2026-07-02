@@ -53,7 +53,7 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 
 - Status services register as `com.victronenergy.fla_equalisation` / `com.victronenergy.fla_charge` (custom prefix — not visible on Device List but avoids introspection issues with `battery` or `genset` prefixes)
 - Temp battery service (used during EQ + charge handoffs): `com.victronenergy.battery.fla_temp`, instance 100, display "FLA Temp Battery". Shared by both services via the file lock.
-- Web dashboards at ports 8088/8089 are the primary monitoring interface (Run Now + Abort buttons)
+- Web dashboards at ports 8088/8089 serve the SAME unified page (both operations' panels + shared system header, Run Now + Abort buttons) — the primary monitoring interface
 
 ### Shared Modules (`fla-shared/`)
 
@@ -68,7 +68,8 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 | `alerting.py` | Cerbo buzzer activation, D-Bus alarm path |
 | `lock.py` | Atomic file lock (`O_EXCL`) preventing concurrent charge + EQ |
 | `aggregate_driver.py` | Start/stop dbus-aggregate-batteries via `svc -u/-d` |
-| `web_engine.py` | Closed HTTP dashboard engine (page, `/api/*`, CORS + OPTIONS preflight), configured by each service's Operation profile |
+| `web_engine.py` | Closed HTTP dashboard engine (`/api/status`, `/api/config`, control POSTs, origin-validated CORS), configured by each service's Operation profile |
+| `unified_page.py` | THE dashboard page — one shared data-driven HTML/JS asset served identically at 8088 and 8089; renders both operations' panels from each service's `/api/config` |
 
 ### Service-Specific Components
 
@@ -76,7 +77,7 @@ Each service (`fla-equalisation/`, `fla-charge/`) contains:
 - `fla_*.py` — main state machine (entry point)
 - `settings.py` — D-Bus settings registration (accessible from Cerbo GUI/VRM)
 - `dbus_status_service.py` — publishes state, voltages, time remaining to D-Bus
-- `operation_profile.py` — the Operation profile card (port 8088 EQ / 8089 charge, title, state-label map, settings schema, HTML template) that configures the shared `web_engine.py`
+- `operation_profile.py` — the Operation profile card (port 8088 EQ / 8089 charge, title, state-label map, settings schema, settings/panel rows, confirm texts) that configures the shared `web_engine.py`; no HTML — the page is shared and data-driven
 - `install.sh` — Venus OS installer (daemontools service + rc.local)
 - `service/run` — daemontools runner script
 
@@ -86,7 +87,7 @@ The DVCC handoff sequence (temp battery registration → aggregate stop → syst
 
 ### Duplication that remains intentional
 
-The `_check()` + worker-thread pattern, `settings.py` base methods, the per-service state enums, scheduling logic, charging phases, and the dashboard HTML (inside each `operation_profile.py`, per ADR-0002) genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (The web *plumbing* is no longer duplicated: `fla-shared/web_engine.py` is a closed engine configured by each service's Operation profile — the web third of Candidate 3 of the architecture review. The settings and status scaffolding thirds of Candidate 3 are still per-service and remain a documented follow-up; CONTEXT.md's "Operation profile" glossary entry describes the full target card, which the code does not yet fully implement.)
+The `_check()` + worker-thread pattern, `settings.py` base methods, the per-service state enums, scheduling logic, and charging phases genuinely differ between fla-charge and fla-equalisation and stay per-service. **When modifying one of these still-duplicated patterns, always apply the same change to both services.** (The web layer is no longer duplicated at all: the dashboard is ONE shared data-driven page (`fla-shared/unified_page.py`, both ports serve the identical asset) and `fla-shared/web_engine.py` is a closed engine configured by each service's Operation profile (see ADR-0002 amendment) — the web third of Candidate 3 of the architecture review. The settings and status scaffolding thirds of Candidate 3 are still per-service and remain a documented follow-up; CONTEXT.md's "Operation profile" glossary entry describes the full target card, which the code does not yet fully implement.)
 
 ## Key Design Decisions
 
@@ -114,8 +115,8 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (287 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 178 tests — shared modules
+# Run all tests (292 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 183 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 63 tests — EQ service
 python3 -m unittest discover -s fla-charge/tests -v        # 46 tests — charge service
 

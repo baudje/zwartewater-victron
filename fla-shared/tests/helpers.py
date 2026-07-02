@@ -159,20 +159,29 @@ class ProfileContractMixin:
         # other origin port must stay refused (CSRF guard).
         self.assertEqual(set(self.PROFILE.allowed_origin_ports), {8088, 8089})
 
-    def test_settings_rows_are_valid_setting_keys(self):
-        import re
-        page = self.PROFILE.render_page()
-        row_keys = set(re.findall(r'data-key="([^"]+)"', page))
-        self.assertTrue(row_keys, "page has no settings rows")
-        self.assertTrue(row_keys.issubset(set(self.PROFILE.settings_keys)),
-                        "page rows not in schema: %s"
-                        % (row_keys - set(self.PROFILE.settings_keys)))
-        self.assertEqual(set(self.PROFILE.settings_keys), set(self.SETTINGS_DEFS))
+    # Setting keys a profile may intentionally leave off the panel.
+    # run_now is a D-Bus pseudo-setting (the RunNow trigger) in both
+    # services — the panel's Run Now button covers it. Override to extend.
+    HIDDEN_SETTINGS = frozenset({"run_now"})
 
-    def test_page_shows_every_state_label(self):
-        page = self.PROFILE.render_page()
-        for label in self.PROFILE.states.values():
-            self.assertIn(label, page)
+    def test_settings_schema_matches_and_rows_cover_it(self):
+        self.assertEqual(set(self.PROFILE.settings_keys), set(self.SETTINGS_DEFS))
+        row_keys = {r["key"] for r in self.PROFILE.settings_rows}
+        # Every setting must be editable from the panel unless explicitly
+        # hidden — a key silently missing here is invisible to the operator.
+        self.assertEqual(row_keys,
+                         set(self.SETTINGS_DEFS) - set(self.HIDDEN_SETTINGS))
+        for row in self.PROFILE.settings_rows:
+            self.assertTrue(row.get("label"), "row %s has no label" % row["key"])
+            self.assertIn(row.get("type"), ("f", "i", "b"))
+
+    def test_config_is_json_serializable(self):
+        # The unified page consumes this card verbatim from /api/config.
+        import json
+        cfg = json.loads(json.dumps(self.PROFILE.config()))
+        self.assertEqual(cfg["title"], self.PROFILE.title)
+        self.assertEqual(set(cfg["states"].keys()),
+                         {str(k) for k in self.PROFILE.states})
 
     def test_old_web_server_module_is_gone(self):
         import os

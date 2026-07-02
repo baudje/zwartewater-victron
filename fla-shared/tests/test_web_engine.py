@@ -42,8 +42,14 @@ def make_profile(**overrides):
             "voltage_delta": None,
             "settings": {},
         },
-        html_template="<html><title>__TITLE__</title>"
-                      "<script>var STATES=__STATES__;var ERR=__ERROR_STATE__;</script></html>",
+        settings_rows=[
+            {"key": "eq_voltage", "label": "EQ voltage", "unit": "V", "type": "f"},
+            {"key": "lfp_soc_min", "label": "Min LFP SoC", "unit": "%", "type": "i"},
+        ],
+        panel_fields=[
+            {"key": "trojan_voltage", "label": "Trojan FLA", "format": "v"},
+        ],
+        run_now_confirm="Start test now?",
     )
     fields.update(overrides)
     return OperationProfile(**fields)
@@ -65,17 +71,52 @@ class EngineHttpTestCase(unittest.TestCase):
 
 
 class TestServesDashboardPage(EngineHttpTestCase):
-    def test_root_serves_rendered_profile_page(self):
+    def test_root_serves_the_unified_page(self):
         resp = self.get("/")
         body = resp.read().decode()
         self.assertEqual(resp.status, 200)
         self.assertIn("text/html", resp.headers["Content-Type"])
-        # Placeholders substituted from the profile.
-        self.assertIn("FLA Test", body)
-        self.assertIn('"1": "Busy"', body)
-        self.assertIn("var ERR=2;", body)
-        self.assertNotIn("__TITLE__", body)
-        self.assertNotIn("__STATES__", body)
+        # The page is data-driven: it carries the dashboard ports and builds
+        # everything else from each service's /api/config at runtime.
+        self.assertIn("[8088, 8089]", body)
+        self.assertIn("/api/config", body)
+        self.assertIn("/api/status", body)
+        self.assertNotIn("__PORTS__", body)
+
+    def test_page_is_identical_regardless_of_profile(self):
+        # "Loading either port shows the same page": nothing per-service may
+        # leak into the page itself — only the ports, shared by both profiles.
+        other = WebEngine(make_profile(
+            name="fla-other", title="Other Op", port=0,
+            states={0: "Idle", 9: "Error"}, error_state=9,
+            settings_keys=["x"], settings_rows=[
+                {"key": "x", "label": "X", "unit": "V", "type": "f"}],
+            panel_fields=[]))
+        self.assertEqual(self.engine._page, other._page)
+
+    def test_page_is_self_contained(self):
+        # Strictly no external hosts: the vessel may be offline. URLs are
+        # built from location.hostname + the injected ports only.
+        body = self.get("/").read().decode()
+        self.assertNotIn("venus.local", body)
+        self.assertNotIn("https://", body)
+        self.assertNotIn("cdn", body.lower())
+
+
+class TestConfigEndpoint(EngineHttpTestCase):
+    def test_config_returns_the_profile_card_with_cors(self):
+        resp = self.get("/api/config")
+        self.assertEqual(resp.status, 200)
+        # Read-only, world-readable: the unified page fetches BOTH services'
+        # configs from whichever port it was loaded on.
+        self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
+        cfg = json.loads(resp.read().decode())
+        self.assertEqual(cfg["title"], "FLA Test")
+        self.assertEqual(cfg["states"]["1"], "Busy")
+        self.assertEqual(cfg["error_state"], 2)
+        self.assertEqual(cfg["settings_rows"][0]["key"], "eq_voltage")
+        self.assertEqual(cfg["panel_fields"][0]["format"], "v")
+        self.assertEqual(cfg["run_now_confirm"], "Start test now?")
 
 
 class TestStatusEndpoint(EngineHttpTestCase):
@@ -392,12 +433,24 @@ class TestProfileValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             WebEngine(make_profile(cache_fields={"state": None, "settings": {}}))
 
-    def test_template_must_contain_the_placeholders(self):
-        # A template without __STATES__ would silently serve a page whose
-        # states map can drift from the service's — the exact bug this
-        # refactor exists to kill.
+    def test_settings_rows_must_use_schema_keys(self):
+        # A row pointing at a non-existent setting would render an input
+        # whose saves are refused at the queue — fail at startup instead.
         with self.assertRaises(ValueError):
-            make_profile(html_template="<html>no placeholders</html>")
+            make_profile(settings_rows=[
+                {"key": "not_a_setting", "label": "X", "unit": "V", "type": "f"}])
+
+    def test_panel_fields_must_use_cache_fields(self):
+        # A panel row for a field the service never publishes would render
+        # a permanently empty '-' — fail at startup instead.
+        with self.assertRaises(ValueError):
+            make_profile(panel_fields=[
+                {"key": "not_a_cache_field", "label": "X", "format": "v"}])
+
+    def test_panel_field_formats_must_be_known(self):
+        with self.assertRaises(ValueError):
+            make_profile(panel_fields=[
+                {"key": "trojan_voltage", "label": "X", "format": "nope"}])
 
 
 if __name__ == "__main__":
