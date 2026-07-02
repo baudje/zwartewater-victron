@@ -16,3 +16,15 @@ this decision closed.
 
 The genuinely-varying parts (HTML, the settings/state *lists*) stay per-service
 inside the Operation profile, where the variation is visible and intended.
+
+## Amendment (unified dashboard, issue #24)
+
+"The genuinely-varying parts (HTML, ...) stay per-service" is superseded for
+the HTML: the dashboard page no longer varies per service at all. ONE shared,
+fully data-driven page (`fla-shared/unified_page.py`) is served identically at
+both ports; it renders each operation's panel at runtime from that service's
+`GET /api/config`. The per-service variation moved out of markup into
+declarative Operation-profile fields (`settings_rows`, `panel_fields`,
+`run_now_confirm`), which is a *stronger* form of this ADR's rule: the closed
+engine now owns even the page, and the only per-service surface left is data.
+The settings/state *lists* still live per-service in the profile, as before.
