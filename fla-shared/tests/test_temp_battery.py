@@ -65,6 +65,23 @@ class TestNeutralServiceName(unittest.TestCase):
         self.assertNotIn('/tmp/fla_eq_cvl', proc)
 
 
+class TestTempBatteryPublishesSoc(unittest.TestCase):
+    """The temp battery must publish a live SoC, not leave /Soc at its None
+    init. While it is DVCC's active monitor during a takeover, an empty/None
+    SoC (Victron's []-sentinel) makes the Quattro raise a false Low Battery
+    alarm for the whole handoff even though the banks are full (found
+    2026-07-02, live EQ run). It mirrors the Trojan SmartShunt's SoC."""
+
+    def test_subprocess_publishes_live_soc(self):
+        path = os.path.join(os.path.dirname(__file__), '..', 'temp_battery_process.py')
+        with open(path) as f:
+            src = f.read()
+        # /Soc must be assigned at runtime (mirrored from the shunt), not only
+        # declared once as None in add_path.
+        self.assertIn('svc["/Soc"] =', src,
+                      "temp_battery_process must publish a live /Soc, not leave it None")
+
+
 class TestDbusMonitorSkipsTempService(unittest.TestCase):
     """get_lfp_soc fallback iterates D-Bus battery services looking for a
     serialbattery. It must skip our temp battery (which has no LFP SoC),

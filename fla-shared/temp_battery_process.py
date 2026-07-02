@@ -81,7 +81,8 @@ def main():
     svc.add_path("/Dc/0/Power", None, writeable=True,
         gettextcallback=lambda a, x: "{:.0f}W".format(x) if x is not None else "---")
 
-    svc.add_path("/Soc", None, writeable=True)
+    svc.add_path("/Soc", None, writeable=True,
+        gettextcallback=lambda a, x: "{:.0f}%".format(x) if x is not None else "---")
     svc.add_path("/Capacity", 435, writeable=True)
     svc.add_path("/InstalledCapacity", 435)
 
@@ -152,6 +153,16 @@ def main():
                 svc["/Dc/0/Current"] = i
                 if v is not None and i is not None:
                     svc["/Dc/0/Power"] = round(v * i, 0)
+            except Exception:
+                pass
+            # Mirror the Trojan SoC. While the temp battery is DVCC's active
+            # monitor during a takeover, a None/empty SoC makes the Quattro
+            # raise a false Low Battery alarm for the whole handoff even though
+            # the banks are full — so publish a real value, not the None init.
+            try:
+                obj = bus.get_object(trojan_service, "/Soc")
+                iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+                svc["/Soc"] = float(iface.GetValue())
             except Exception:
                 pass
 
