@@ -68,6 +68,15 @@ UNIFIED_TEMPLATE = """<!DOCTYPE html>
   td.outcome-success { color: #4caf50; }
   td.outcome-aborted { color: #ff9800; }
   td.outcome-failed { color: #f44336; }
+  details.graphbox summary { color: #8bb4d9; font-size: 0.85em; text-transform: uppercase;
+    letter-spacing: 1px; cursor: pointer; }
+  svg.chart { width: 100%; height: 80px; background: #0d1b2a; border-radius: 4px;
+    display: block; margin: 2px 0 6px 0; }
+  svg.chart polyline { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .glabel { color: #8899aa; font-size: 0.78em; margin-top: 8px; }
+  .glegend { float: right; }
+  .glegend b { font-weight: 600; }
+  .nogr { color: #556677; font-size: 0.78em; padding: 6px 0; }
 </style>
 </head>
 <body>
@@ -135,6 +144,8 @@ function buildPanel(port) {
   h += '<div class="card"><h2>Recent runs</h2><table class="runs">' +
        '<thead><tr><th>Start</th><th>Outcome</th><th>Peak V</th><th>At target</th><th>Delta</th></tr></thead>' +
        '<tbody id="runs_'+port+'"><tr><td colspan="5">-</td></tr></tbody></table></div>';
+  h += '<div class="card"><details class="graphbox" id="graphbox_'+port+'">' +
+       '<summary>Graphs (last 3h)</summary><div id="graphs_'+port+'" class="nogr">-</div></details></div>';
   h += '<div class="card"><details class="logbox" id="logbox_'+port+'">' +
        '<summary>Log</summary><pre class="log" id="log_'+port+'">-</pre></details></div>';
   d.innerHTML = h;
@@ -181,6 +192,65 @@ function renderPanel(port) {
     });
   }
   el("abort_"+port).style.display = (d.state>0 && d.state<cfg.error_state) ? "inline-block" : "none";
+}
+
+function chartSvg(t, seriesArr) {
+  // Inline SVG polylines — strictly no external chart libraries.
+  var W = 320, H = 80, P = 4, vals = [];
+  seriesArr.forEach(function(s){ s.v.forEach(function(x){ if (x != null) vals.push(x); }); });
+  if (vals.length < 2 || t.length < 2) return '<div class="nogr">not enough data yet</div>';
+  var mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals);
+  if (mx - mn < 1e-9) { mx = mn + 1; }
+  var t0 = t[0], t1 = t[t.length - 1];
+  if (t1 - t0 < 1e-9) t1 = t0 + 1;
+  var body = "";
+  seriesArr.forEach(function(s){
+    var seg = [];
+    for (var i = 0; i < t.length; i++) {
+      var y = s.v[i];
+      if (y == null) {
+        if (seg.length) { body += '<polyline points="'+seg.join(" ")+'" stroke="'+s.c+'"/>'; seg = []; }
+        continue;
+      }
+      var px = P + (W - 2*P) * (t[i] - t0) / (t1 - t0);
+      var py = H - P - (H - 2*P) * (y - mn) / (mx - mn);
+      seg.push(px.toFixed(1) + "," + py.toFixed(1));
+    }
+    if (seg.length) body += '<polyline points="'+seg.join(" ")+'" stroke="'+s.c+'"/>';
+  });
+  return '<svg class="chart" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">' + body +
+         '</svg>';
+}
+
+var GRAPH_DEFS = [
+  {title: "Voltage (V)", series: [{k:"trojan_voltage", c:"#ff9800", l:"Trojan"},
+                                  {k:"lfp_voltage",   c:"#4a8ad9", l:"LFP"}]},
+  {title: "Trojan current (A)", series: [{k:"trojan_current", c:"#4caf50", l:"I"}]},
+  {title: "Delta (V)", series: [{k:"voltage_delta", c:"#f44336", l:"\u0394"}]},
+  {title: "SoC (%)", series: [{k:"trojan_soc", c:"#ff9800", l:"Trojan"},
+                              {k:"lfp_soc",   c:"#4a8ad9", l:"LFP"}]}
+];
+
+function refreshGraphs(port) {
+  // Only fetch while the operator has the graphs card open.
+  var box = el("graphbox_"+port);
+  if (!box || !box.open || !SVC[port].reachable) return;
+  fetch(base(port)+"/api/history?window=10800").then(function(r){ return r.json(); })
+    .then(function(d){
+      var html = GRAPH_DEFS.map(function(def){
+        var arr = def.series.filter(function(s){
+          return d.series[s.k] && d.series[s.k].some(function(x){ return x != null; });
+        }).map(function(s){ return {v: d.series[s.k], c: s.c}; });
+        if (!arr.length) return "";
+        var legend = def.series.map(function(s){
+          return '<b style="color:'+s.c+'">'+s.l+'</b>';
+        }).join(" ");
+        return '<div class="glabel">'+def.title+'<span class="glegend">'+legend+'</span></div>' +
+               chartSvg(d.t, arr);
+      }).join("");
+      el("graphs_"+port).innerHTML = html || '<div class="nogr">no samples yet</div>';
+      el("graphs_"+port).className = "";
+    }).catch(function(){});
 }
 
 function esc(t) { var d=document.createElement("span"); d.textContent=t==null?"-":String(t); return d.innerHTML; }
@@ -266,7 +336,7 @@ function refresh() {
         .then(function(d){ SVC[port].status = d; SVC[port].reachable = true; });
     }).catch(function(){ SVC[port].reachable = false; })
       .then(function(){
-        renderPanel(port); refreshLog(port);
+        renderPanel(port); refreshLog(port); refreshGraphs(port);
         if (cycle % 12 === 0) refreshRuns(port);
       });
   });

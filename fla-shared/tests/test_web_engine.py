@@ -83,6 +83,9 @@ class TestServesDashboardPage(EngineHttpTestCase):
         self.assertIn("/api/status", body)
         self.assertIn("/api/log", body)
         self.assertIn("/api/runs", body)
+        self.assertIn("/api/history", body)
+        # Inline SVG chart builder — no external chart libraries.
+        self.assertIn("<svg", body)
         self.assertNotIn("__PORTS__", body)
 
     def test_page_is_identical_regardless_of_profile(self):
@@ -453,6 +456,49 @@ class TestRunsEndpoint(EngineHttpTestCase):
             self.assertEqual(data["runs"], [])
         finally:
             server.shutdown()
+
+
+class TestHistoryEndpoint(EngineHttpTestCase):
+    """update_cache feeds the ring buffer (rate-limited inside the buffer),
+    so graphs need NO changes in the services' code."""
+
+    def setUp(self):
+        self.now = [1000.0]
+        self.engine = WebEngine(make_profile(), clock=lambda: self.now[0])
+        self.server = self.engine.start()
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+
+    def test_cache_updates_are_sampled_and_served(self):
+        self.engine.update_cache(trojan_voltage=31.0, lfp_voltage=27.0)
+        self.now[0] += 35
+        self.engine.update_cache(trojan_voltage=31.2, voltage_delta=4.2)
+        resp = self.get("/api/history")
+        self.assertEqual(resp.headers["Access-Control-Allow-Origin"], "*")
+        data = json.loads(resp.read().decode())
+        self.assertEqual(len(data["t"]), 2)
+        self.assertEqual(data["series"]["trojan_voltage"], [31.0, 31.2])
+        # Second sample carries the last-known lfp_voltage (cache semantics).
+        self.assertEqual(data["series"]["lfp_voltage"], [27.0, 27.0])
+
+    def test_updates_within_the_interval_are_not_resampled(self):
+        self.engine.update_cache(trojan_voltage=31.0)
+        self.now[0] += 5
+        self.engine.update_cache(trojan_voltage=31.1)
+        data = json.loads(self.get("/api/history").read().decode())
+        self.assertEqual(len(data["t"]), 1)
+
+    def test_window_query_limits_the_series(self):
+        for i in range(4):
+            self.engine.update_cache(trojan_voltage=30.0 + i)
+            self.now[0] += 100
+        data = json.loads(self.get("/api/history?window=250").read().decode())
+        self.assertEqual(data["series"]["trojan_voltage"], [32.0, 33.0])
+
+    def test_only_tracked_cache_fields_are_sampled(self):
+        data = json.loads(self.get("/api/history").read().decode())
+        # settings/state/time_remaining are cache fields but not series.
+        self.assertNotIn("settings", data["series"])
+        self.assertNotIn("state", data["series"])
 
 
 class TestRunNowMessageHook(ControlTestCase):

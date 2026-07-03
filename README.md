@@ -271,8 +271,8 @@ ssh root@venus.local 'dbus -y com.victronenergy.settings /Settings/FlaCharge/Run
 ## Testing
 
 ```bash
-# Run all tests (319 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 200 tests — shared modules
+# Run all tests (328 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 209 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 68 tests — EQ service
 python3 -m unittest discover -s fla-charge/tests -v        # 51 tests — charge service
 
@@ -280,7 +280,7 @@ python3 -m unittest discover -s fla-charge/tests -v        # 51 tests — charge
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
 ```
 
-319 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract incl. live-SoC publishing, the Takeover handoff/teardown/resume sequence incl. abort-aware discovery waits and abort-vs-timeout disambiguation, and the shared web engine incl. CORS/preflight and Operation-profile validation), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
+328 tests covering: all shared modules (relay control, voltage matching, temp compensation, lock, alerting, aggregate driver, temp battery contract incl. live-SoC publishing, the Takeover handoff/teardown/resume sequence incl. abort-aware discovery waits and abort-vs-timeout disambiguation, and the shared web engine incl. CORS/preflight and Operation-profile validation), EQ scheduling/safety/happy path/Orion failure/RunNow preservation/settings-bounds enforcement/status-service deregister/lock-held branch/resume-on-startup, and charge scheduling/phase transitions/safety guards/taper detection/settings-bounds enforcement/AC-availability error logging/resume-on-startup.
 
 ## Files
 
@@ -311,7 +311,8 @@ zwartewater-victron/
 |   +-- unified_page.py              # The unified dashboard page (identical at both ports)
 |   +-- log_tail.py                  # Bounded log-file tail for the log card
 |   +-- run_history.py               # JSONL run-history store (one line per run)
-|   +-- tests/                      # 200 unit tests for shared modules
+|   +-- history_buffer.py            # In-memory ring buffer feeding the live graphs
+|   +-- tests/                      # 209 unit tests for shared modules
 +-- fla-equalisation/
 |   +-- install.sh                  # Venus OS installer
 |   +-- install-remote.sh           # Remote installer (wget one-liner)
