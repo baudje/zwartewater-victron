@@ -14,6 +14,7 @@ handlers must never touch D-Bus.
 
 import json
 import logging
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Lock, Thread
 from urllib.parse import urlsplit
@@ -128,7 +129,14 @@ class OperationProfile:
 class WebEngine:
     """Closed HTTP engine for one FLA service, configured by its profile."""
 
-    def __init__(self, profile):
+    # Cache fields sampled into the graphs ring buffer when a profile
+    # declares them (~24h at >=30s: 2880 points).
+    HISTORY_FIELDS = ("trojan_voltage", "lfp_voltage", "voltage_delta",
+                      "trojan_soc", "lfp_soc", "trojan_current")
+    HISTORY_CAPACITY = 2880
+    HISTORY_MIN_INTERVAL = 30.0
+
+    def __init__(self, profile, clock=time.time):
         self.profile = profile
         # The SAME page is served at both ports; it discovers each panel's
         # content from /api/config at runtime. Only the port list (shared
@@ -150,6 +158,15 @@ class WebEngine:
         self._abort_requested = False
         self._pending_settings = []
         self._pending_settings_lock = Lock()
+        # Graphs ring buffer, fed from update_cache — the services need no
+        # changes; the buffer rate-limits itself. Memory-only by design
+        # (no flash wear; lost on restart).
+        from history_buffer import HistoryBuffer
+        self._history = HistoryBuffer(
+            fields=[f for f in self.HISTORY_FIELDS if f in self._cache],
+            capacity=self.HISTORY_CAPACITY,
+            min_interval=self.HISTORY_MIN_INTERVAL,
+            clock=clock)
 
     # Short kwarg names used by shared callers (voltage_matching's
     # cache_callback) mapped onto the full cache field names. Identical for
@@ -170,6 +187,7 @@ class WebEngine:
             if value is None:
                 continue
             self._cache[key] = value
+        self._history.sample({f: self._cache.get(f) for f in self._history.fields})
 
     def start(self):
         """Start serving on the profile's port from a daemon thread."""
@@ -211,6 +229,10 @@ class WebEngine:
             self._send_json(req, {"lines": self._log_lines(req.path)}, read_only=True)
         elif req.path == "/api/runs" or req.path.startswith("/api/runs?"):
             self._send_json(req, {"runs": self._runs(req.path)}, read_only=True)
+        elif req.path == "/api/history" or req.path.startswith("/api/history?"):
+            window = self._query_int(req.path, "window", 0)
+            self._send_json(req, self._history.window(window if window > 0 else None),
+                            read_only=True)
         else:
             req.send_response(404)
             req.end_headers()
