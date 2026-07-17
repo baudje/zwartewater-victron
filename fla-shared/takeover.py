@@ -18,7 +18,7 @@ import aggregate_driver
 import relay_control
 import voltage_matching
 from temp_battery import TempBatteryService, is_temp_battery_running
-from lock import release as release_lock
+from lock import release as release_lock, is_locked as lock_is_locked
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,12 @@ SNAPSHOT_FILE = "/tmp/fla_dvcc_originals.json"
 
 TEMP_INSTANCE = 100
 TEMP_SERVICE = "com.victronenergy.battery/100"
+# The aggregate battery (dbus-aggregate-batteries) DeviceInstance — the ONLY BMS
+# that reports the full-bank 120A CCL. DVCC must read CVL/CCL from this in steady
+# state; a drift onto a single serialbattery pack (instance 3/4, 60A) silently
+# halves LFP charge (the 2026-05-28 event). Both the idle guard and the teardown
+# restore key on this.
+AGGREGATE_INSTANCE = 99
 TEMP_CHARGE_CURRENT = 60.0  # FLA recommended max bulk current
 # After restart_systemcalc() returns, systemcalc's slow post-restart D-Bus scan
 # on Venus OS v3.80~33 keeps the bus congested, so the temp battery (instance
@@ -79,6 +85,45 @@ def delete_originals():
         os.unlink(SNAPSHOT_FILE)
     except OSError:
         pass
+
+
+# Per-episode dedup for the idle BMS guard: alarm once when the selection drifts,
+# re-arm only after it returns to the aggregate. Module-level because the guard is
+# stateless and both services call the same function (the lock guarantees they
+# never run an operation concurrently).
+_idle_bms_alarm_active = False
+
+
+def verify_idle_bms_selection(monitor, alerting, status=None):
+    """Guard the DVCC controlling-BMS selection while NO FLA operation is active.
+
+    Steady state: DVCC reads CVL/CCL from the aggregate (AGGREGATE_INSTANCE, full
+    120A). If it drifts onto a single serialbattery pack (60A) — the 2026-05-28
+    failure — LFP charge current is silently halved. Raise an alarm so it's caught
+    in minutes, not weeks.
+
+    Skipped while an FLA op holds the lock (BmsInstance is then legitimately the
+    temp battery, 100). Idempotent per episode: alarms once on drift, re-arms after
+    the selection returns to the aggregate. Returns True (healthy), False (drifted
+    and alarmed), or None (op active — not checked)."""
+    global _idle_bms_alarm_active
+    if lock_is_locked():
+        return None  # an FLA op owns the DVCC selection right now
+    if monitor.get_bms_instance() == AGGREGATE_INSTANCE:
+        if _idle_bms_alarm_active:
+            log.info("DVCC BMS selection back on the aggregate (instance %d)",
+                     AGGREGATE_INSTANCE)
+            _idle_bms_alarm_active = False
+        return True
+    if not _idle_bms_alarm_active:
+        alerting.raise_alarm(
+            "DVCC controlling BMS is not the aggregate (instance %d) — LFP charge "
+            "is limited to a single 60A pack; re-select the aggregate in DVCC"
+            % AGGREGATE_INSTANCE,
+            status_service=status,
+        )
+        _idle_bms_alarm_active = True
+    return False
 
 
 class Takeover:
@@ -255,6 +300,12 @@ class Takeover:
             try:
                 aggregate_driver.start()
                 self.monitor.invalidate_services()
+                # Wait for the aggregate (instance 99) to be rediscovered BEFORE
+                # re-selecting it below — symmetric with hand_off's temp-battery
+                # discovery wait. Writing BmsInstance to an instance DVCC can't yet
+                # see lets it reject the choice and auto-fall-back to a single 60A
+                # pack: the silent 2026-05-28 half-charge failure.
+                self.monitor.wait_for_service_instance(AGGREGATE_INSTANCE)
             except Exception:
                 log.error("CRITICAL: Failed to restart aggregate driver in teardown")
             self._aggregate_stopped = False
@@ -283,6 +334,31 @@ class Takeover:
                         log.info("BatteryService restored to %s", originals["battery_service"])
                     except Exception:
                         log.error("CRITICAL: Failed to restore BatteryService")
+                # Confirm the selection actually took (symmetric with hand_off's
+                # wait_for_bms_selection). If DVCC didn't accept it — e.g. the
+                # aggregate wasn't ready — re-assert once; if it STILL won't stick,
+                # alarm. Never leave DVCC silently on a single 60A pack after a
+                # reconnect (the 2026-05-28 half-charge failure).
+                if (originals.get("bms_instance") is not None
+                        and originals.get("battery_service") is not None
+                        and not self.monitor.wait_for_bms_selection(
+                            originals["battery_service"], originals["bms_instance"])):
+                    log.error("CRITICAL: DVCC BMS selection did not return to %s/%s — "
+                              "re-asserting", originals["battery_service"],
+                              originals["bms_instance"])
+                    try:
+                        self.monitor.set_bms_instance(originals["bms_instance"])
+                        self.monitor.set_battery_service_setting(originals["battery_service"])
+                    except Exception:
+                        log.error("CRITICAL: Failed to re-assert DVCC BMS selection")
+                    if not self.monitor.wait_for_bms_selection(
+                            originals["battery_service"], originals["bms_instance"]):
+                        self.alerting.raise_alarm(
+                            "DVCC BMS selection did not return to the aggregate after "
+                            "reconnect — verify the DVCC controlling BMS manually "
+                            "(LFP charge may be limited to a single 60A pack)",
+                            status_service=self.status,
+                        )
                 if originals.get("max_charge_voltage") is not None:
                     # Restored here too (not only in hand_back): covers the edge
                     # where the relay closed without a hand_back — e.g. an external

@@ -511,5 +511,68 @@ class TestResumeAttach(unittest.TestCase):
         self.assertTrue(self.alerting.raise_alarm.called)
 
 
+class TestTeardownBmsConfirm(_TakeoverFixtureMixin, unittest.TestCase):
+    """Fix #2: teardown must be symmetric with hand_off — wait for the aggregate
+    to be rediscovered before re-selecting it, then CONFIRM the selection took, so
+    DVCC can't silently fall back to a single 60A pack after an FLA op."""
+
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_tdc.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_waits_for_aggregate_before_reselecting_bms(self, mrelease, magg):
+        monitor = MockMonitor(relay_state=1)
+        order = []
+        monitor.wait_for_service_instance = MagicMock(
+            side_effect=lambda instance, **k: order.append(("wait", instance)) or "svc")
+        monitor.set_bms_instance = MagicMock(
+            side_effect=lambda v: order.append(("set_bms", v)) or True)
+        t = self._make(monitor)
+
+        t.teardown()
+
+        # The aggregate (instance 99) must be confirmed present BEFORE we point
+        # DVCC back at it — otherwise DVCC rejects the absent instance and
+        # auto-falls-back to a single pack.
+        self.assertIn(("wait", takeover.AGGREGATE_INSTANCE), order)
+        self.assertLess(order.index(("wait", takeover.AGGREGATE_INSTANCE)),
+                        order.index(("set_bms", -1)))
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_confirms_bms_selection_after_restore(self, mrelease, magg):
+        monitor = MockMonitor(relay_state=1)
+        confirmed = {}
+        monitor.wait_for_bms_selection = MagicMock(
+            side_effect=lambda bs, bms, **k: confirmed.update(bs=bs, bms=bms) or True)
+        t = self._make(monitor)  # snapshot: battery/277, bms -1
+
+        t.teardown()
+
+        self.assertEqual(confirmed["bs"], "com.victronenergy.battery/277")
+        self.assertEqual(confirmed["bms"], -1)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_reasserts_and_alarms_when_selection_not_confirmed(self, mrelease, magg):
+        monitor = MockMonitor(relay_state=1)
+        monitor.wait_for_bms_selection = MagicMock(return_value=False)  # never takes
+        sets = []
+        monitor.set_bms_instance = MagicMock(side_effect=lambda v: sets.append(v) or True)
+        t = self._make(monitor)
+
+        t.teardown()
+
+        # Re-asserted (written more than once) and, still failing, alarmed.
+        self.assertGreaterEqual(len(sets), 2)
+        self.assertTrue(self.alerting.raise_alarm.called)
+        mrelease.assert_called_once()  # still completes teardown (bus is safe, relay closed)
+
+
 if __name__ == '__main__':
     unittest.main()

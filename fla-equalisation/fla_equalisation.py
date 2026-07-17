@@ -48,7 +48,7 @@ check_run_now = _engine.check_run_now
 check_abort = _engine.check_abort
 clear_abort = _engine.clear_abort
 drain_pending_settings = _engine.drain_pending_settings
-from takeover import Takeover, TakeoverStates
+from takeover import Takeover, TakeoverStates, verify_idle_bms_selection
 
 EQ_TAKEOVER_STATES = TakeoverStates(
     stopping_driver=STATE_STOPPING_DRIVER,
@@ -407,6 +407,11 @@ class FlaEqualisationService:
         try:
             # Apply any pending settings from web UI
             self._apply_pending_settings()
+
+            # While idle, DVCC's controlling BMS must be the aggregate (120A). A
+            # silent drift onto a single 60A pack halves LFP charge (2026-05-28);
+            # this alarms in minutes instead of weeks.
+            verify_idle_bms_selection(self.monitor, alerting, self.status)
 
             if check_abort():
                 log.info("Abort requested while idle — cleared to prevent queueing")
