@@ -336,9 +336,12 @@ class Takeover:
                         log.error("CRITICAL: Failed to restore BatteryService")
                 # Confirm the selection actually took (symmetric with hand_off's
                 # wait_for_bms_selection). If DVCC didn't accept it — e.g. the
-                # aggregate wasn't ready — re-assert once; if it STILL won't stick,
-                # alarm. Never leave DVCC silently on a single 60A pack after a
-                # reconnect (the 2026-05-28 half-charge failure).
+                # aggregate wasn't ready — re-assert once. If it STILL won't stick,
+                # only LOG it: a hand_back success makes run_*/resume clear the
+                # alarm right after teardown (#33), so an alarm here would be wiped
+                # moments later. The idle guard (verify_idle_bms_selection) is the
+                # durable backstop — it re-alarms within one ~60s tick once the
+                # lock releases and DVCC is still off the aggregate.
                 if (originals.get("bms_instance") is not None
                         and originals.get("battery_service") is not None
                         and not self.monitor.wait_for_bms_selection(
@@ -353,12 +356,9 @@ class Takeover:
                         log.error("CRITICAL: Failed to re-assert DVCC BMS selection")
                     if not self.monitor.wait_for_bms_selection(
                             originals["battery_service"], originals["bms_instance"]):
-                        self.alerting.raise_alarm(
-                            "DVCC BMS selection did not return to the aggregate after "
-                            "reconnect — verify the DVCC controlling BMS manually "
-                            "(LFP charge may be limited to a single 60A pack)",
-                            status_service=self.status,
-                        )
+                        log.error("CRITICAL: DVCC BMS selection did not return to the "
+                                  "aggregate after reconnect — the idle guard will "
+                                  "alarm shortly; verify the DVCC controlling BMS")
                 if originals.get("max_charge_voltage") is not None:
                     # Restored here too (not only in hand_back): covers the edge
                     # where the relay closed without a hand_back — e.g. an external

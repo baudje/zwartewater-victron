@@ -559,19 +559,40 @@ class TestTeardownBmsConfirm(_TakeoverFixtureMixin, unittest.TestCase):
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.release_lock')
-    def test_reasserts_and_alarms_when_selection_not_confirmed(self, mrelease, magg):
+    def test_reasserts_and_logs_but_does_not_alarm_when_not_confirmed(self, mrelease, magg):
+        # #33: the caller (run_*/resume) clears the alarm on a successful hand_back,
+        # so an alarm raised here is wiped moments later. Demoted to a log; the idle
+        # guard (verify_idle_bms_selection) is the real backstop within one tick.
         monitor = MockMonitor(relay_state=1)
         monitor.wait_for_bms_selection = MagicMock(return_value=False)  # never takes
         sets = []
         monitor.set_bms_instance = MagicMock(side_effect=lambda v: sets.append(v) or True)
         t = self._make(monitor)
+        svc = t.temp_service  # teardown nulls this after deregistering — capture first
 
         t.teardown()
 
-        # Re-asserted (written more than once) and, still failing, alarmed.
-        self.assertGreaterEqual(len(sets), 2)
-        self.assertTrue(self.alerting.raise_alarm.called)
-        mrelease.assert_called_once()  # still completes teardown (bus is safe, relay closed)
+        self.assertGreaterEqual(len(sets), 2)               # re-asserted the selection
+        self.alerting.raise_alarm.assert_not_called()       # but did NOT alarm (would be cleared)
+        mrelease.assert_called_once()                       # teardown still completes
+        svc.deregister.assert_called_once()                 # temp battery deregistered
+        self.assertIsNone(takeover.load_originals())        # snapshot deleted
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_completes_restore_when_aggregate_not_rediscovered(self, mrelease, magg):
+        # wait_for_service_instance timing out (returns None) must not wedge
+        # teardown — it proceeds to restore the selection and release the lock.
+        monitor = MockMonitor(relay_state=1)
+        monitor.wait_for_service_instance = MagicMock(return_value=None)  # discovery timeout
+        recorded = {}
+        monitor.set_bms_instance = MagicMock(side_effect=lambda v: recorded.update(bms=v) or True)
+        t = self._make(monitor)
+
+        t.teardown()
+
+        self.assertEqual(recorded["bms"], -1)   # snapshot bms restored anyway
+        mrelease.assert_called_once()
 
 
 if __name__ == '__main__':
