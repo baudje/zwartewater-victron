@@ -938,6 +938,16 @@ class TestCheckStartsWorker(unittest.TestCase):
         finally:
             _engine.clear_run_now()
 
+    @patch('fla_equalisation.verify_idle_bms_selection')
+    @patch('fla_equalisation.should_run', return_value=False)
+    def test_idle_check_runs_the_bms_guard(self, _sr, mock_guard):
+        # Every idle tick must verify DVCC's controlling BMS is the aggregate —
+        # the guard that would have caught the 2026-05-28 silent half-charge.
+        svc = self._service()
+        svc._check()
+        mock_guard.assert_called_once()
+        self.assertIs(mock_guard.call_args.args[0], svc.monitor)
+
 
 class TestRunHistoryRecords(unittest.TestCase):
     """Every run exit path — success, operator abort, failure — must append
