@@ -36,6 +36,7 @@ class MockMonitor:
         self._battery_temp = kwargs.get('battery_temp', 25.0)
         self._battery_service = kwargs.get('battery_service', "com.victronenergy.battery.aggregate")
         self._bms_instance = kwargs.get('bms_instance', -1)
+        self._ess_state = kwargs.get('ess_state', 10)
         self._relay_set_calls = []
         self._invalidated = False
 
@@ -80,6 +81,13 @@ class MockMonitor:
 
     def get_battery_temperature(self):
         return self._battery_temp
+
+    def get_ess_state(self):
+        return self._ess_state
+
+    def set_ess_state(self, state):
+        self._ess_state = state
+        return True
 
     def get_bms_instance(self):
         return self._bms_instance

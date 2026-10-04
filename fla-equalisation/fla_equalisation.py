@@ -32,6 +32,7 @@ from settings import Settings
 import alerting
 from alerting import raise_alarm, clear_alarm
 from relay_control import verify_relay_still_open, startup_safety_check
+from charge_guard import DischargeGuard
 from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock
 from run_history import append_run
@@ -75,6 +76,7 @@ LAST_EQ_FILE = "/data/apps/fla-equalisation/last_equalisation"
 # One JSON line per finished run (success/aborted/failed) — issue #25.
 RUN_HISTORY_FILE = "/data/apps/fla-equalisation/run-history.jsonl"
 CHECK_INTERVAL_SEC = 60  # Check conditions every 60 seconds
+RETRY_BACKOFF_SEC = 3600  # no scheduled retry for an hour after a failed run
 
 
 def read_last_equalisation():
@@ -167,6 +169,9 @@ def run_equalisation(settings, monitor, status):
         eq_start = time.time()
         eq_timeout = settings.eq_timeout_hours * 3600
         i_trojan_none_count = 0
+        discharge_guard = DischargeGuard()
+        reached_target = False
+        failure = None  # set when the run reconnects but did not equalise
 
         while True:
             elapsed = time.time() - eq_start
@@ -209,10 +214,19 @@ def run_equalisation(settings, monitor, status):
             else:
                 i_trojan_none_count = 0
 
-            if i_trojan is not None and abs(i_trojan) > 60:
-                log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", abs(i_trojan))
+            if i_trojan is not None and i_trojan > 60:
+                log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", i_trojan)
+
+            # A bank that is being discharged is not being charged: stop and
+            # reconnect instead of running out the timeout (2026-10-03).
+            if discharge_guard.tripped(i_trojan):
+                failure = ("Trojan bank discharging during equalisation (%.1fA at %.1fV) — "
+                           "no charge reaching it" % (i_trojan, v_trojan))
+                log.error(failure)
+                break
 
             voltage_reached = v_trojan is not None and v_trojan >= (eq_voltage - 0.1)
+            reached_target = reached_target or voltage_reached
             if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.eq_current_complete:
                 log.info("Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
                          v_trojan, eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60)
@@ -237,6 +251,15 @@ def run_equalisation(settings, monitor, status):
 
         run_record["minutes_at_target"] = round(elapsed / 60, 1)
 
+        # A timeout (or lost current reading) below the target voltage is not an
+        # equalisation: reconnect, but alarm and do not advance the interval.
+        if failure is None and not reached_target and not aborted_by_operator:
+            failure = "Equalisation ended without reaching %.1fV (peak %.1fV)" % (
+                eq_voltage, run_record["peak_trojan_voltage"] or 0)
+        if failure:
+            status.update(state=STATE_ERROR)
+            raise_alarm(failure, status_service=status)
+
         # Hand back: float-hold, close, guarded teardown.
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -250,6 +273,10 @@ def run_equalisation(settings, monitor, status):
         run_record["reconnect_delta"] = delta
         if not matched:
             status.update(state=STATE_ERROR)
+            return False
+
+        if failure:
+            status.update(state=STATE_ERROR)  # reconnected safely; the alarm stays up
             return False
 
         run_record["outcome"] = "aborted" if aborted_by_operator else "success"
@@ -277,6 +304,8 @@ def run_equalisation(settings, monitor, status):
 
 class FlaEqualisationService:
     """Persistent service that checks conditions and runs equalisation."""
+
+    _retry_after = 0.0  # epoch seconds; scheduled runs wait until then after a failure
 
     def __init__(self):
         # Build the monitor first (cheap — no D-Bus scan; service discovery is
@@ -445,7 +474,10 @@ class FlaEqualisationService:
             if not self._failed:
                 self._update_idle_status()
 
-            if should_run(self.settings, self.monitor):
+            # After a failed run, wait before retrying on the schedule (2026-10-03:
+            # run 3 started 3 seconds after run 2 failed). RunNow still forces one.
+            backing_off = time.time() < self._retry_after and not self.settings.run_now
+            if not backing_off and should_run(self.settings, self.monitor):
                 self._running = True
                 self._failed = False
                 _engine.clear_run_now()  # discard any queued web RunNow once the run starts
@@ -467,6 +499,8 @@ class FlaEqualisationService:
                         if success:
                             self._failed = False
                             GLib.idle_add(self._update_idle_status)
+                        else:
+                            self._retry_after = time.time() + RETRY_BACKOFF_SEC
 
                 threading.Thread(target=_worker, daemon=True).start()
 

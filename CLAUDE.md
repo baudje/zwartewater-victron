@@ -66,6 +66,7 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 | `temp_compensation.py` | Trojan temp compensation: ±0.005V/cell/°C (±0.06V/°C for 12 cells) |
 | `dbus_monitor.py` | Reads SmartShunt voltages/currents, SoC, relay state, DVCC settings |
 | `alerting.py` | Cerbo buzzer activation, D-Bus alarm path |
+| `charge_guard.py` | `DischargeGuard` — trips when the isolated Trojan bank discharges (< -5A for ~2 min) during a charge/EQ loop |
 | `lock.py` | Atomic file lock (`O_EXCL`) preventing concurrent charge + EQ |
 | `aggregate_driver.py` | Start/stop dbus-aggregate-batteries via `svc -u/-d` |
 | `web_engine.py` | Closed HTTP dashboard engine (`/api/status`, `/api/config`, control POSTs, origin-validated CORS), configured by each service's Operation profile |
@@ -112,16 +113,19 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 - systemcalc must be restarted after registering temp battery service (doesn't discover services registered after boot)
 - Web dashboards have Abort button (visible during active operations, triggers safe cleanup via finally block)
 - Safe-hold reconnect: the relay is auto-closed ONLY when the Trojan↔LFP delta is within `RELAY_CLOSE_DELTA_MAX` (1V). On any exit with the relay still open, the system never tears down DVCC — it holds the bus on the temp battery and alarms (`Takeover.teardown` / `wait_for_match` safe-hold). There is no "last-resort" high-delta auto-close; the operator restores power or closes relay 2 manually. (Supersedes the earlier delta-aware-`finally` auto-close behaviour.)
+- During a takeover ESS is forced to "Keep batteries charged" (`/Settings/CGwacs/BatteryLife/State` = 9) before relay 2 opens and restored in teardown. ESS "Optimized" otherwise discharges the isolated Trojan bank to its min SoC even on shore power (2026-10-03: 99% → 29%, 20.45V)
+- A charge/EQ run only counts as done if the Trojans reached the target voltage; a timeout below target, or a discharging bank, reconnects, alarms and does not advance the schedule. A failed run is not retried on the schedule for 1h (`RETRY_BACKOFF_SEC`); Run Now overrides
+- The DVCC originals snapshot lives on `/data` (`fla-shared/dvcc_originals.json`); a snapshot left by a dead run is finished by `recover_stale_takeover` (the real teardown, under the lock) from each service's idle tick
 - Temperature compensation adjusts all target voltages per Trojan datasheet (reads from JK BMS sensor)
 - All settings exposed via Venus OS D-Bus settings and web UIs
 
 ## Testing
 
 ```bash
-# Run all tests (349 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 228 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 69 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 52 tests — charge service
+# Run all tests (365 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 236 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 73 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 56 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v

@@ -1038,5 +1038,90 @@ class TestRunHistoryRecords(unittest.TestCase):
         self.assertEqual(recs[0]["outcome"], "failed")
 
 
+class TestIncident20261003Guards(unittest.TestCase):
+    """2026-10-03: the EQ loop ran 150 min while the Trojans discharged at -50A
+    (logged as "High Trojan charge current"), timed out without ever reaching
+    the target, and was then recorded as a successful equalisation."""
+
+    def _run(self, monitor, times):
+        settings, status = MockSettings(), MockStatus()
+        with patch('fla_equalisation.time') as mt, \
+                patch('fla_equalisation.acquire_lock', return_value=True), \
+                patch('fla_equalisation.verify_relay_still_open', return_value=True), \
+                patch('fla_equalisation.check_abort', return_value=False), \
+                patch('fla_equalisation.update_cache'), \
+                patch('fla_equalisation.append_run'), \
+                patch('fla_equalisation.clear_alarm') as mclear, \
+                patch('fla_equalisation.raise_alarm') as malarm, \
+                patch('fla_equalisation.write_last_equalisation') as mwrite, \
+                patch('fla_equalisation.Takeover') as MockT:
+            mt.time.side_effect = times
+            mt.sleep = MagicMock()
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.4)
+            MockT.return_value = inst
+            result = run_equalisation(settings, monitor, status)
+        return result, inst, mwrite, malarm, mclear, status, mt
+
+    def test_discharging_bank_stops_the_run_and_reconnects(self):
+        monitor = MockMonitor(trojan_voltage=24.4, trojan_current=-45.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, list(range(0, 3000, 30)))
+        self.assertFalse(result)
+        inst.hand_back.assert_called_once()       # controlled reconnect, not a hard stop
+        mwrite.assert_not_called()                # interval not advanced
+        self.assertTrue(malarm.called)
+        mclear.assert_not_called()                # the alarm stays up
+        self.assertIn(STATE_ERROR, status.states)
+        self.assertLess(mt.sleep.call_count, 10)  # minutes, not the full timeout
+
+    def test_timeout_without_reaching_target_is_not_a_success(self):
+        monitor = MockMonitor(trojan_voltage=27.0, trojan_current=30.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, [0, 10, 99999, 99999, 99999])
+        self.assertFalse(result)
+        inst.hand_back.assert_called_once()
+        mwrite.assert_not_called()
+        self.assertTrue(malarm.called)
+
+    def test_timeout_after_reaching_target_still_counts(self):
+        monitor = MockMonitor(trojan_voltage=31.5, trojan_current=30.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, [0, 10, 99999, 99999, 99999])
+        self.assertTrue(result)
+        mwrite.assert_called_once()
+
+
+class TestRetryBackoff(unittest.TestCase):
+    """2026-10-03: EQ run 3 started 3 seconds after run 2 failed."""
+
+    def _service(self):
+        from fla_equalisation import FlaEqualisationService
+        svc = FlaEqualisationService.__new__(FlaEqualisationService)
+        svc.settings = MagicMock(run_now=False)
+        svc.monitor = MagicMock()
+        svc.status = MagicMock()
+        svc._running = False
+        svc._failed = False
+        svc._update_idle_status = lambda: None
+        return svc
+
+    @patch('fla_equalisation.verify_idle_bms_selection')
+    @patch('fla_equalisation.run_equalisation', return_value=False)
+    @patch('fla_equalisation.should_run', return_value=True)
+    def test_failed_run_is_not_retried_on_the_next_tick(self, _sr, mrun, _g):
+        svc = self._service()
+        with patch('fla_equalisation.threading.Thread') as mthread:
+            svc._check()
+            mthread.call_args.kwargs["target"]()      # run the worker inline
+            self.assertEqual(mrun.call_count, 1)
+            svc._check()
+            self.assertEqual(mthread.call_count, 1, "no second run inside the backoff")
+            svc.settings.run_now = True               # the operator can still force one
+            svc._check()
+            self.assertEqual(mthread.call_count, 2)
+
+
 if __name__ == '__main__':
     unittest.main()
