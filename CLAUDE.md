@@ -122,9 +122,9 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (375 total)
+# Run all tests (379 total)
 python3 -m unittest discover -s fla-shared/tests -v      # 240 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 76 tests — EQ service
+python3 -m unittest discover -s fla-equalisation/tests -v  # 80 tests — EQ service (incl. 4 scenario tests)
 python3 -m unittest discover -s fla-charge/tests -v        # 59 tests — charge service
 
 # Run a single test file
@@ -134,7 +134,7 @@ python3 -m unittest fla-shared/tests/test_relay_control.py -v
 python3 -m unittest fla-equalisation.tests.test_fla_equalisation.TestScheduling.test_disabled_returns_false -v
 ```
 
-Tests mock D-Bus calls — no Venus OS required. Shared test helpers in `fla-shared/tests/helpers.py` (MockMonitor, MockStatus, dbus_mock_setup). All service test files import from helpers — do not duplicate mock classes.
+Tests mock D-Bus calls — no Venus OS required. `fla-equalisation/tests/test_scenarios.py` runs the real service tick, Takeover, relay control and reconnect hold end to end against `fla-shared/tests/sim_boat.py` (a crude simulated boat with a virtual clock, incl. a reboot mid-run); the first scenario is the 2026-10-03 incident. There are no tests against a real Venus OS or D-Bus. Shared test helpers in `fla-shared/tests/helpers.py` (MockMonitor, MockStatus, dbus_mock_setup). All service test files import from helpers — do not duplicate mock classes.
 
 ## Deployment
 
