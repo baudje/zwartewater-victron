@@ -7,26 +7,20 @@ failures were in the combination — a reboot mid-run, ESS behaviour, and a seco
 run stacked on the first. The first scenario is that incident.
 """
 
-import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared', 'tests'))
 
-from helpers import dbus_mock_setup, MockStatus
+from helpers import dbus_mock_setup
 dbus_mock_setup()
 
-import alerting
-import lock
-import takeover
 import fla_equalisation
-from sim_boat import SimBoat, SimReboot
+from scenario_case import ScenarioCase
+from sim_boat import SimReboot
 
 
 class Settings:
@@ -49,99 +43,14 @@ class Settings:
         setattr(self, key, value)
 
 
-class InlineThread:
-    """threading.Thread stand-in: the worker runs to completion inside start()."""
-    def __init__(self, target=None, daemon=None):
-        self._target = target
-
-    def start(self):
-        self._target()
+class EqualisationCase(ScenarioCase):
+    module = fla_equalisation
+    service_class = "FlaEqualisationService"
+    settings_class = Settings
+    last_run_attr = "LAST_EQ_FILE"
 
 
-class ScenarioCase(unittest.TestCase):
-    def setUp(self):
-        self.data = tempfile.mkdtemp(prefix="simboat-")   # stands in for /data
-        self.addCleanup(shutil.rmtree, self.data, True)
-        self.sim = sim = SimBoat(self.data)
-        self.alarms = []
-        self.last_eq = os.path.join(self.data, "last_equalisation")
-
-        def raise_alarm(message, status_service=None):
-            self.alarms.append(message)
-
-        def clear_alarm(status_service=None):
-            self.alarms.clear()
-
-        for target, attr, value in [
-            ("time.time", None, sim.now), ("time.monotonic", None, sim.now),
-            ("time.sleep", None, sim.sleep),
-            (lock, "LOCK_FILE", os.path.join(self.data, "operation.lock")),
-            # /proc is not there on a dev machine; liveness is the PID check alone.
-            (lock, "_pid_matches_service", lambda pid, service: True),
-            (takeover, "SNAPSHOT_FILE", os.path.join(self.data, "dvcc_originals.json")),
-            (takeover, "TempBatteryService", sim.temp_battery_class()),
-            (takeover, "is_temp_battery_running", lambda: sim.temp_cvl is not None),
-            (takeover, "aggregate_driver", sim.aggregate_driver()),
-            (alerting, "raise_alarm", raise_alarm), (alerting, "clear_alarm", clear_alarm),
-            (alerting, "activate_buzzer", lambda *a, **k: None),
-            (fla_equalisation, "raise_alarm", raise_alarm),
-            (fla_equalisation, "clear_alarm", clear_alarm),
-            (fla_equalisation, "LAST_EQ_FILE", self.last_eq),
-            (fla_equalisation, "RUN_HISTORY_FILE", os.path.join(self.data, "run-history.jsonl")),
-            (fla_equalisation.threading, "Thread", InlineThread),
-        ]:
-            p = patch(target, value) if attr is None else patch.object(target, attr, value)
-            p.start()
-            self.addCleanup(p.stop)
-        takeover._idle_bms_alarm_active = False
-        self.service = self.start_service()
-
-    def start_service(self):
-        """A fresh service process (in-memory state such as the backoff is new)."""
-        svc = fla_equalisation.FlaEqualisationService.__new__(
-            fla_equalisation.FlaEqualisationService)
-        svc.settings = Settings()
-        svc.monitor = self.sim
-        svc.status = MockStatus()
-        svc._running = False
-        svc._failed = False
-        svc._update_idle_status = lambda: None
-        return svc
-
-    def tick(self, times=1):
-        """One 60s service tick; a run started by the tick completes inside it."""
-        for _ in range(times):
-            self.sim.sleep(60)
-            self.service._check()
-
-    def power_cut(self):
-        """Reboot the Cerbo: the lock's owner is gone, the service starts fresh."""
-        self.sim.reboot()
-        self.alarms.clear()
-        lock_file = lock.LOCK_FILE
-        if os.path.exists(lock_file):
-            with open(lock_file) as f:
-                info = json.load(f)
-            info["pid"] = 2 ** 30   # a PID that does not exist after the reboot
-            with open(lock_file, "w") as f:
-                json.dump(info, f)
-        self.service = self.start_service()
-
-    def assert_back_to_normal(self):
-        sim = self.sim
-        self.assertEqual(sim.relay, 1, "relay 2 closed")
-        self.assertEqual(sim.bms_instance, 99, "DVCC on the aggregate")
-        self.assertEqual(sim.battery_service, "com.victronenergy.battery/277")
-        self.assertEqual(sim.ess_state, 10, "ESS mode restored")
-        self.assertEqual(sim.max_charge_voltage, 32.0)
-        self.assertIsNone(sim.temp_cvl, "temp battery stopped")
-        self.assertTrue(sim.aggregate_running)
-        self.assertFalse(os.path.exists(lock.LOCK_FILE), "operation lock released")
-        self.assertIsNone(takeover.load_originals(), "DVCC snapshot consumed")
-        self.assertEqual(sim.lfp_overvoltage_s, 0, "LFP never saw more than 28.4V")
-
-
-class TestEqualisationScenarios(ScenarioCase):
+class TestEqualisationScenarios(EqualisationCase):
     def test_normal_equalisation_on_shore_power(self):
         sim = self.sim
         self.tick()
@@ -149,7 +58,7 @@ class TestEqualisationScenarios(ScenarioCase):
         self.assertGreaterEqual(sim.peak_v_trojan, 31.4, "reached the EQ voltage")
         self.assertEqual(sim.isolated_discharge_s, 0, "Trojans never discharged while isolated")
         self.assertEqual(sim.bms_lost_s, 0)
-        self.assertTrue(os.path.exists(self.last_eq), "equalisation recorded")
+        self.assertTrue(os.path.exists(self.last_run), "equalisation recorded")
         self.assertEqual(self.alarms, [])
         self.tick(3)
         self.assertEqual(sim.relay, 1, "no second run: the interval advanced")
@@ -177,7 +86,7 @@ class TestEqualisationScenarios(ScenarioCase):
         self.tick(2)                     # the equalisation is still due: it runs again
         self.assert_back_to_normal()
         self.assertGreaterEqual(sim.peak_v_trojan, 31.4)
-        self.assertTrue(os.path.exists(self.last_eq))
+        self.assertTrue(os.path.exists(self.last_run))
         self.assertEqual(sim.isolated_discharge_s, 0, "Trojans never discharged while isolated")
         self.assertGreater(sim.min_v_trojan, 26.0)
         self.assertLessEqual(sim.bms_lost_s, 120)
@@ -194,7 +103,7 @@ class TestEqualisationScenarios(ScenarioCase):
         self.assert_back_to_normal()
         self.assertLessEqual(sim.isolated_discharge_s, 300, "reconnected within minutes")
         self.assertGreater(sim.min_v_trojan, 26.0)
-        self.assertFalse(os.path.exists(self.last_eq), "not recorded as an equalisation")
+        self.assertFalse(os.path.exists(self.last_run), "not recorded as an equalisation")
         self.assertTrue(any("discharging" in a for a in self.alarms), self.alarms)
         open_before = sim.relay_open_s
         self.tick(5)
@@ -207,7 +116,7 @@ class TestEqualisationScenarios(ScenarioCase):
         self.assertEqual(sim.relay_open_s, 0, "LFP bank never isolated")
         self.assertEqual(sim.relay, 1)
         self.assertEqual(sim.bms_instance, 99)
-        self.assertFalse(os.path.exists(self.last_eq))
+        self.assertFalse(os.path.exists(self.last_run))
         self.assertTrue(self.alarms)
 
 

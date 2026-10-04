@@ -826,5 +826,38 @@ class TestEssKeepCharged(unittest.TestCase):
         self.assertEqual(monitor.get_ess_state(), 10)
 
 
+class TestIsolationCheckHasSomethingToSee(unittest.TestCase):
+    """2026-10-04: fla-charge hands off at the live bus voltage. With ESS on
+    keep-charged the charger held the Trojans there, the banks never diverged,
+    and verify_relay_open failed the run with relay 2 open."""
+
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_iso.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+
+    def _handoff(self, safe_voltage):
+        order = []
+        with patch('takeover.aggregate_driver') as magg, patch('takeover.relay_control') as mrelay, \
+                patch('takeover.TempBatteryService') as MockTBS:
+            magg.stop.return_value = True
+            mrelay.open_relay.side_effect = lambda *a, **k: order.append("open") or True
+            mrelay.verify_relay_open.side_effect = lambda *a, **k: order.append("verify") or True
+            temp = MagicMock(**{"register.return_value": True})
+            temp.set_charge_voltage.side_effect = lambda v: order.append(v)
+            MockTBS.return_value = temp
+            t = takeover.Takeover(MockMonitor(bms_instance=99), MockStatus(), MagicMock(),
+                                  "fla-charge", _states())
+            self.assertTrue(t.hand_off_in(safe_voltage=safe_voltage, target_voltage=29.83))
+        return order
+
+    def test_cvl_lifted_to_lfp_safe_between_open_and_verify(self):
+        self.assertEqual(self._handoff(27.0), ["open", 28.4, "verify", 29.83])
+
+    def test_never_above_lfp_safe_before_isolation_is_verified(self):
+        order = self._handoff(28.4)
+        self.assertEqual(order, ["open", "verify", 29.83])
+
+
 if __name__ == '__main__':
     unittest.main()

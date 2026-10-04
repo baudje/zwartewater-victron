@@ -41,3 +41,20 @@
      condition (target voltage reached).
   4. An automatic restore must reuse the one real teardown, not a lighter copy
      (review of PR #36).
+
+## 2026-10-04 — the ESS fix broke the charge handoff on its first real run
+
+- **Failure mode**: forcing ESS to keep-charged (PR #37) made the charger hold the
+  Trojans at the temp battery CVL. fla-charge hands off at the live bus voltage,
+  so after relay 2 opened the banks stayed level, `verify_relay_open` saw no
+  divergence and failed the run with the relay open. The old divergence had
+  come from the very discharge the fix removed.
+- **Detection signal**: "LFP/Trojan voltage did not diverge" right after "Relay 2
+  opened", with both shunts within 0.05V.
+- **Prevention rules**:
+  1. When a fix changes what the hardware does, list every check that relied on
+     the old behaviour (here: isolation proof by voltage divergence).
+  2. A change in the shared takeover needs a scenario test for BOTH services
+     before it is deployed; the EQ scenarios passed and the charge had none.
+  3. First run of new control code on the boat is supervised, and started by
+     whoever is watching the log.

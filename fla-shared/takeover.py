@@ -16,6 +16,7 @@ from collections import namedtuple
 
 import aggregate_driver
 import relay_control
+from relay_control import LFP_SAFE_CVL
 import voltage_matching
 from temp_battery import TempBatteryService, is_temp_battery_running
 from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
@@ -297,6 +298,15 @@ class Takeover:
         self.status.update(state=self.states.disconnecting)
         if not relay_control.open_relay(self.monitor):
             return self._fail("Failed to open relay 2")
+        # The isolation check below needs the two banks to drift apart. With ESS
+        # on keep-charged the charger holds the Trojans AT the temp battery CVL,
+        # so a safe voltage equal to the bus voltage (fla-charge) leaves both
+        # banks level and the check fails with the relay open (2026-10-04).
+        # Lift the CVL to the LFP-safe maximum first: the charger pulls the
+        # isolated Trojans up, and if the relay did not open the LFP bank only
+        # sees its normal absorption voltage.
+        if safe_voltage < LFP_SAFE_CVL:
+            self.temp_service.set_charge_voltage(LFP_SAFE_CVL)
         if not relay_control.verify_relay_open(self.monitor):
             return self._fail("LFP not disconnected after relay open")
 

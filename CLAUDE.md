@@ -116,16 +116,17 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 - During a takeover ESS is forced to "Keep batteries charged" (`/Settings/CGwacs/BatteryLife/State` = 9) before relay 2 opens and restored in teardown. ESS "Optimized" otherwise discharges the isolated Trojan bank to its min SoC even on shore power (2026-10-03: 99% → 29%, 20.45V)
 - A charge/EQ run only counts as done if the tail current was reached at the target voltage, or the target was held for 30 min (`MIN_POLLS_AT_TARGET`) before the timeout; anything else, or a discharging bank, reconnects, alarms and does not advance the schedule. A failed run is not retried on the schedule for 24h (EQ) / 1h (charge) (`RETRY_BACKOFF_SEC`, in memory); Run Now overrides. The takeover refuses to open the relay if the ESS mode cannot be read
 - The DVCC originals snapshot lives on `/data` (`fla-shared/dvcc_originals.json`); a snapshot left by a dead run is finished by `recover_stale_takeover` (the real teardown, under the lock) from each service's idle tick
+- After relay 2 opens, the takeover lifts the temp battery CVL to the LFP-safe 28.4V before the isolation check, so the charger pulls the Trojans away from the LFP voltage. Without it, ESS keep-charged holds both banks level and the divergence check fails with the relay open (2026-10-04)
 - Temperature compensation adjusts all target voltages per Trojan datasheet (reads from JK BMS sensor)
 - All settings exposed via Venus OS D-Bus settings and web UIs
 
 ## Testing
 
 ```bash
-# Run all tests (379 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 240 tests — shared modules
+# Run all tests (383 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 242 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 80 tests — EQ service (incl. 4 scenario tests)
-python3 -m unittest discover -s fla-charge/tests -v        # 59 tests — charge service
+python3 -m unittest discover -s fla-charge/tests -v        # 61 tests — charge service (incl. 2 scenario tests)
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v
@@ -134,7 +135,7 @@ python3 -m unittest fla-shared/tests/test_relay_control.py -v
 python3 -m unittest fla-equalisation.tests.test_fla_equalisation.TestScheduling.test_disabled_returns_false -v
 ```
 
-Tests mock D-Bus calls — no Venus OS required. `fla-equalisation/tests/test_scenarios.py` runs the real service tick, Takeover, relay control and reconnect hold end to end against `fla-shared/tests/sim_boat.py` (a crude simulated boat with a virtual clock, incl. a reboot mid-run); the first scenario is the 2026-10-03 incident. There are no tests against a real Venus OS or D-Bus. Shared test helpers in `fla-shared/tests/helpers.py` (MockMonitor, MockStatus, dbus_mock_setup). All service test files import from helpers — do not duplicate mock classes.
+Tests mock D-Bus calls — no Venus OS required. `fla-equalisation/tests/test_scenarios.py` and `fla-charge/tests/test_scenarios.py` run the real service tick, Takeover, relay control and reconnect hold end to end against `fla-shared/tests/sim_boat.py` via `fla-shared/tests/scenario_case.py` (a crude simulated boat with a virtual clock, incl. a reboot mid-run); the first scenario is the 2026-10-03 incident. There are no tests against a real Venus OS or D-Bus. Shared test helpers in `fla-shared/tests/helpers.py` (MockMonitor, MockStatus, dbus_mock_setup). All service test files import from helpers — do not duplicate mock classes.
 
 ## Deployment
 
