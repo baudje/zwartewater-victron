@@ -48,7 +48,8 @@ check_run_now = _engine.check_run_now
 check_abort = _engine.check_abort
 clear_abort = _engine.clear_abort
 drain_pending_settings = _engine.drain_pending_settings
-from takeover import Takeover, TakeoverStates, verify_idle_bms_selection
+from takeover import Takeover, TakeoverStates, verify_idle_bms_selection, \
+    has_stale_snapshot, recover_stale_takeover
 
 CHARGE_TAKEOVER_STATES = TakeoverStates(
     stopping_driver=STATE_STOPPING_DRIVER,
@@ -527,6 +528,25 @@ class FlaChargeService:
             return True
         try:
             self._apply_pending_settings()
+
+            # A DVCC snapshot with no operation running is a takeover whose owner
+            # died (2026-10-03 reboot mid-EQ). Finish its teardown before anything
+            # else; in a worker, because it waits on the aggregate rediscovery.
+            if has_stale_snapshot():
+                self._running = True
+
+                def _recover():
+                    try:
+                        if not recover_stale_takeover(self.monitor, self.status, alerting,
+                                                      "fla-charge", CHARGE_TAKEOVER_STATES):
+                            verify_idle_bms_selection(self.monitor, alerting, self.status)
+                    except Exception as e:
+                        log.exception("Stale takeover recovery error: %s", e)
+                    finally:
+                        self._running = False
+
+                threading.Thread(target=_recover, daemon=True).start()
+                return True
 
             # While idle, DVCC's controlling BMS must be the aggregate (120A). A
             # silent drift onto a single 60A pack halves LFP charge (2026-05-28);

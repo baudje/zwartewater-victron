@@ -595,5 +595,126 @@ class TestTeardownBmsConfirm(_TakeoverFixtureMixin, unittest.TestCase):
         mrelease.assert_called_once()
 
 
+class TestRebootIncident20261003(unittest.TestCase):
+    """2026-10-03: the Cerbo rebooted mid-EQ. The /tmp snapshot was lost while
+    DVCC's persistent settings still pointed at the temp battery (100). The next
+    run snapshotted those takeover values as "originals", and its hand-back
+    restored BmsInstance=100 to a dead service -> "BMS lost" for 1.5h."""
+
+    def setUp(self):
+        self._real_snapshot_file = takeover.SNAPSHOT_FILE
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_reboot.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
+        takeover._idle_bms_alarm_active = False
+
+    def test_snapshot_survives_reboot(self):
+        # /tmp is wiped on reboot; the snapshot must live on the /data partition.
+        self.assertTrue(self._real_snapshot_file.startswith("/data/"))
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.TempBatteryService')
+    def test_hand_off_refuses_when_dvcc_still_on_temp_battery(self, MockTBS, magg):
+        for kwargs in ({"bms_instance": 100},
+                       {"battery_service": takeover.TEMP_SERVICE, "bms_instance": 99}):
+            monitor = MockMonitor(**kwargs)
+            t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
+            self.assertFalse(t.hand_off_in(safe_voltage=28.4, target_voltage=31.5))
+            MockTBS.return_value.register.assert_not_called()
+            magg.stop.assert_not_called()
+            self.assertIsNone(takeover.load_originals(), "must not snapshot takeover values")
+            self.assertTrue(self.alerting.raise_alarm.called)
+
+    def _stale(self, **kw):
+        takeover.save_originals("com.victronenergy.battery/277", 99, 32.0)
+        m = MockMonitor(relay_state=1, bms_instance=100,
+                        battery_service=takeover.TEMP_SERVICE, **kw)
+        m.set_dvcc_max_charge_voltage = MagicMock(return_value=True)
+        return m
+
+    def _recover(self, m):
+        return takeover.recover_stale_takeover(m, self.status, self.alerting,
+                                               "fla-equalisation", _states())
+
+    @patch('takeover.is_temp_battery_running', return_value=False)
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.acquire_lock', return_value=True)
+    def test_recover_runs_real_teardown(self, macq, mrel, magg, _run):
+        m = self._stale()
+        order = []
+        magg.start.side_effect = lambda: order.append("start")
+        m.wait_for_service_instance = MagicMock(side_effect=lambda i, **k: order.append(i) or "svc")
+        m.set_bms_instance = MagicMock(side_effect=lambda v: order.append("bms=%s" % v) or True)
+        self.assertTrue(self._recover(m))
+        # aggregate up and rediscovered BEFORE it is re-selected
+        self.assertEqual(order[:3], ["start", 99, "bms=99"])
+        self.assertEqual(m.get_battery_service_setting(), "com.victronenergy.battery/277")
+        m.set_dvcc_max_charge_voltage.assert_called_with(32.0)
+        self.assertIsNone(takeover.load_originals(), "snapshot consumed")
+        mrel.assert_called_once()
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.acquire_lock', return_value=True)
+    def test_recover_leaves_everything_while_relay_open(self, macq, mrel, magg):
+        m = self._stale()
+        m._relay_state = 0
+        self.assertFalse(self._recover(m))
+        macq.assert_not_called()
+        self.assertEqual(m.get_bms_instance(), 100)
+        self.assertIsNotNone(takeover.load_originals())
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.acquire_lock', return_value=False)
+    def test_recover_backs_off_when_lock_held(self, macq, magg):
+        m = self._stale()
+        self.assertFalse(self._recover(m))
+        self.assertEqual(m.get_bms_instance(), 100)
+        self.assertIsNotNone(takeover.load_originals())
+        magg.start.assert_not_called()
+
+    @patch('takeover.is_temp_battery_running', return_value=False)
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    @patch('takeover.acquire_lock', return_value=True)
+    def test_unconfirmed_restore_keeps_snapshot_for_retry(self, macq, mrel, magg, _run):
+        # The monitor setters swallow D-Bus errors and return False, so only the
+        # confirm can tell that a restore did not take.
+        m = self._stale()
+        m.wait_for_bms_selection = MagicMock(return_value=False)
+        self._recover(m)
+        self.assertIsNotNone(takeover.load_originals())
+        mrel.assert_called_once()   # lock still released, so the next tick can retry
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.release_lock')
+    def test_refusal_does_not_let_finally_teardown_eat_the_snapshot(self, mrel, magg):
+        m = self._stale()
+        t = takeover.Takeover(m, self.status, self.alerting, "fla-equalisation", _states())
+        self.assertFalse(t.hand_off_in(safe_voltage=28.4, target_voltage=31.5))
+        t.abort_teardown()   # what the service's finally does
+        self.assertIsNotNone(takeover.load_originals())
+        mrel.assert_called_once()
+
+    def test_idle_guard_no_longer_writes_dvcc(self):
+        m = self._stale()
+        with patch.object(takeover, "lock_is_locked", return_value=False):
+            self.assertFalse(takeover.verify_idle_bms_selection(m, self.alerting, self.status))
+        self.assertEqual(m.get_bms_instance(), 100)
+        self.assertIsNotNone(takeover.load_originals())
+
+    def test_has_stale_snapshot(self):
+        with patch.object(takeover, "lock_is_locked", return_value=False):
+            self.assertFalse(takeover.has_stale_snapshot())
+            takeover.save_originals("com.victronenergy.battery/277", 99, 32.0)
+            self.assertTrue(takeover.has_stale_snapshot())
+        with patch.object(takeover, "lock_is_locked", return_value=True):
+            self.assertFalse(takeover.has_stale_snapshot())
+        self.assertFalse(os.path.exists(self._tmp + ".tmp"))
+
+
 if __name__ == '__main__':
     unittest.main()
