@@ -40,6 +40,7 @@ class TestEqualisationScenarios(EqualisationCase):
         self.assert_back_to_normal()
         self.assertGreaterEqual(sim.peak_v_trojan, 31.4, "reached the EQ voltage")
         self.assertEqual(sim.isolated_discharge_s, 0, "Trojans never discharged while isolated")
+        self.assertEqual(sim.svs_at_high_cvl_s, 0, "Quattro regulated on its own terminals")
         self.assertEqual(sim.bms_lost_s, 0)
         self.assertTrue(os.path.exists(self.last_run), "equalisation recorded")
         self.assertEqual(self.alarms, [])

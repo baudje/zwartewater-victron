@@ -395,6 +395,28 @@ class DbusMonitor:
             log.error("Failed to set ESS BatteryLife state: %s", e)
             return False
 
+    def get_shared_voltage_sense(self):
+        """Read the DVCC shared voltage sense setting (0 = off, 1 = on)."""
+        return _get_dbus_value(
+            self.bus, "com.victronenergy.settings",
+            "/Settings/SystemSetup/SharedVoltageSense",
+        )
+
+    def set_shared_voltage_sense(self, value):
+        """Set the DVCC shared voltage sense setting. Returns True on success."""
+        try:
+            obj = self.bus.get_object(
+                "com.victronenergy.settings",
+                "/Settings/SystemSetup/SharedVoltageSense",
+            )
+            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+            iface.SetValue(dbus.Int32(value))
+            log.info("Shared voltage sense set to %d", value)
+            return True
+        except dbus.exceptions.DBusException as e:
+            log.error("Failed to set shared voltage sense: %s", e)
+            return False
+
     def invalidate_services(self):
         """Force re-discovery of SmartShunt services."""
         self._lfp_service = None

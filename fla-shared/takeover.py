@@ -46,6 +46,9 @@ ISOLATION_PROBE_HEADROOM = 0.5
 ISOLATION_PROBE_DROP = 1.0
 # /Settings/CGwacs/BatteryLife/State value for ESS "Keep batteries charged".
 ESS_KEEP_CHARGED = 9
+# /Settings/SystemSetup/SharedVoltageSense values.
+SVS_OFF = 0
+SVS_ON = 1
 # After restart_systemcalc() returns, systemcalc's slow post-restart D-Bus scan
 # on Venus OS v3.80~33 keeps the bus congested, so the temp battery (instance
 # 100) can take far longer than the wait_for_service_instance 10s default to
@@ -63,7 +66,8 @@ TakeoverStates = namedtuple(
 )
 
 
-def save_originals(battery_service, bms_instance, max_charge_voltage, ess_state=None):
+def save_originals(battery_service, bms_instance, max_charge_voltage, ess_state=None,
+                   shared_voltage_sense=None):
     """Persist the DVCC originals snapshot. Returns True on success."""
     # Atomic (tmp + fsync + replace): on /data a power loss mid-write must not
     # leave a truncated snapshot that reads back as "originals lost".
@@ -75,6 +79,7 @@ def save_originals(battery_service, bms_instance, max_charge_voltage, ess_state=
                 "bms_instance": bms_instance,
                 "max_charge_voltage": max_charge_voltage,
                 "ess_state": ess_state,
+                "shared_voltage_sense": shared_voltage_sense,
             }, f)
             f.flush()
             os.fsync(f.fileno())
@@ -262,10 +267,12 @@ class Takeover:
             "bms_instance": self.monitor.get_bms_instance(),
             "max_charge_voltage": self.monitor.get_dvcc_max_charge_voltage(),
             "ess_state": self._read_ess_state(),
+            "shared_voltage_sense": self.monitor.get_shared_voltage_sense(),
         }
         self._originals = originals
         save_originals(originals["battery_service"], originals["bms_instance"],
-                       originals["max_charge_voltage"], originals["ess_state"])
+                       originals["max_charge_voltage"], originals["ess_state"],
+                       originals["shared_voltage_sense"])
         log.info("Saving BatteryService=%s, BmsInstance=%s, DVCC MaxChargeVoltage=%s",
                  originals["battery_service"], originals["bms_instance"],
                  originals["max_charge_voltage"])
@@ -321,6 +328,16 @@ class Takeover:
             # at the probe voltage: back to the gentlest known-safe level.
             self.temp_service.set_charge_voltage(min(safe_voltage, v_bus))
             return self._fail("LFP not disconnected after relay open")
+
+        # With shared voltage sense on, the Quattro regulates on the temp battery's
+        # voltage, which reaches it ~4s late; after a load step the charge voltage
+        # then rings for a minute or two (2026-10-04: 27.6V..30.06V at a 29.8V
+        # target). Off, it regulates on its own terminals. Not safety-relevant:
+        # a failed read or write only logs, and teardown restores the setting.
+        if originals["shared_voltage_sense"] == SVS_ON:
+            if not self.monitor.set_shared_voltage_sense(SVS_OFF):
+                log.warning("Could not switch shared voltage sense off — "
+                            "the charge voltage may swing after load changes")
 
         # 7. Raise the DVCC ceiling and the temp battery CVL to the target.
         self.monitor.set_dvcc_max_charge_voltage(target_voltage + 0.5)  # headroom above target
@@ -456,6 +473,20 @@ class Takeover:
                         confirmed = False
                     else:
                         log.info("ESS mode changed during the run (now %s) — leaving it", current)
+                # Shared voltage sense: same rule as the ESS mode.
+                if originals.get("shared_voltage_sense") == SVS_ON:
+                    current = self.monitor.get_shared_voltage_sense()
+                    if current == SVS_ON:
+                        pass  # never switched off, or already restored
+                    elif current == SVS_OFF and self.monitor.set_shared_voltage_sense(SVS_ON):
+                        log.info("Shared voltage sense restored to on")
+                    elif current in (None, SVS_OFF):
+                        log.error("CRITICAL: Failed to restore shared voltage sense — "
+                                  "will retry")
+                        confirmed = False
+                    else:
+                        log.info("Shared voltage sense changed during the run (now %s) — "
+                                 "leaving it", current)
 
         # The temp battery is no longer the selected BMS — safe to deregister.
         if self.temp_service is not None:

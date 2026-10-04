@@ -45,6 +45,7 @@ class TestChargeScenarios(ChargeCase):
         self.assertGreaterEqual(sim.peak_v_trojan, 29.5, "reached the absorption voltage")
         self.assertLess(sim.peak_v_trojan, 30.2, "and not beyond it")
         self.assertEqual(sim.isolated_discharge_s, 0)
+        self.assertEqual(sim.svs_at_high_cvl_s, 0, "Quattro regulated on its own terminals")
         self.assertEqual(sim.bms_lost_s, 0)
         self.assertTrue(os.path.exists(self.last_run), "charge recorded")
         self.assertEqual(self.alarms, [])

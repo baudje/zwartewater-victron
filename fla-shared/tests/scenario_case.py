@@ -113,6 +113,7 @@ class ScenarioCase(unittest.TestCase):
         self.assertEqual(sim.bms_instance, 99, "DVCC on the aggregate")
         self.assertEqual(sim.battery_service, "com.victronenergy.battery/277")
         self.assertEqual(sim.ess_state, 10, "ESS mode restored")
+        self.assertEqual(sim.shared_voltage_sense, 1, "shared voltage sense restored")
         self.assertEqual(sim.max_charge_voltage, 32.0)
         self.assertIsNone(sim.temp_cvl, "temp battery stopped")
         self.assertTrue(sim.aggregate_running)
