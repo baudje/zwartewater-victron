@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
 import tempfile
+import itertools
 
 # Add project and shared modules to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -438,7 +439,7 @@ class TestRunEqualisationHappyPath(unittest.TestCase):
                                        mock_lock):
         """Full EQ sequence with handoff/reconnect via Takeover returns True."""
         # EQ loop: first iteration sees current below threshold → complete
-        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.time.side_effect = itertools.count(0, 30)  # enough polls for a full tail window
         mock_time.sleep = MagicMock()
         settings, monitor, status = self._make_mocks(
             trojan_voltage=31.5, trojan_current=5.0,  # Below eq_current_complete=10
@@ -467,7 +468,7 @@ class TestRunEqualisationHappyPath(unittest.TestCase):
         """The states run_equalisation itself emits, in order. The handoff and
         reconnect display states (STOPPING_DRIVER … RESTARTING_DRIVER) are now
         set inside the Takeover and asserted in test_takeover.py."""
-        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.time.side_effect = itertools.count(0, 30)  # enough polls for a full tail window
         mock_time.sleep = MagicMock()
         settings, monitor, status = self._make_mocks(
             trojan_voltage=31.5, trojan_current=5.0, lfp_voltage=28.0,
@@ -527,7 +528,7 @@ class TestOrionFailureDetection(unittest.TestCase):
                                           mock_write_eq, mock_relay_check,
                                           mock_lock):
         """LFP voltage stable (within 0.3V) should not trigger Orion alarm."""
-        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.time.side_effect = itertools.count(0, 30)  # enough polls for a full tail window
         mock_time.sleep = MagicMock()
         monitor = MockMonitor(
             trojan_voltage=31.5, trojan_current=5.0,
@@ -553,7 +554,7 @@ class TestOrionFailureDetection(unittest.TestCase):
                                               mock_write_eq, mock_relay_check,
                                               mock_lock):
         """LFP voltage=None should not trigger false Orion alarm."""
-        mock_time.time.side_effect = [0, 5, 10]
+        mock_time.time.side_effect = itertools.count(0, 30)  # enough polls for a full tail window
         mock_time.sleep = MagicMock()
         # First call returns value (at disconnect), subsequent calls return None
         call_count = [0]

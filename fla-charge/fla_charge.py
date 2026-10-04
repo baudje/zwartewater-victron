@@ -23,7 +23,7 @@ from gi.repository import GLib
 from dbus_monitor import DbusMonitor
 from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
 from relay_control import verify_relay_still_open, startup_safety_check
-from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET
+from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET, TailWindow, TAIL_POLLS
 from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
 from run_history import append_run
 from temp_compensation import compensate as temp_compensate
@@ -274,6 +274,7 @@ def run_charge(settings, monitor, status):
         abs_timeout = settings.fla_absorption_max_hours * 3600
         i_trojan_none_count = 0
         discharge_guard = DischargeGuard()
+        tail = TailWindow()
         polls_at_target = 0
         completed = False  # tail current reached at the target voltage
         failure = None  # set when the run reconnects but did not complete the charge
@@ -351,11 +352,12 @@ def run_charge(settings, monitor, status):
             # Absorption complete — only after voltage reaches the target
             voltage_reached = v_trojan is not None and v_trojan >= (abs_voltage - 0.1)
             polls_at_target += voltage_reached
-            if voltage_reached and i_trojan is not None and 0 <= i_trojan < settings.fla_absorption_complete_current:
+            tail.add(voltage_reached, i_trojan)
+            if tail.complete(settings.fla_absorption_complete_current):
                 completed = True
-                log.info("Absorption complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
-                         v_trojan, abs_voltage, abs(i_trojan),
-                         settings.fla_absorption_complete_current, elapsed / 60)
+                log.info("Absorption complete: target %.1fV held, mean current %.1fA < %.1fA "
+                         "over the last %d polls (%.0f min)",
+                         abs_voltage, tail.mean_current(), settings.fla_absorption_complete_current, TAIL_POLLS, elapsed / 60)
                 break
 
             if elapsed > abs_timeout:

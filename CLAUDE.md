@@ -66,7 +66,7 @@ Reconnecting: close relay, restart aggregate, restore BmsInstance
 | `temp_compensation.py` | Trojan temp compensation: ±0.005V/cell/°C (±0.06V/°C for 12 cells) |
 | `dbus_monitor.py` | Reads SmartShunt voltages/currents, SoC, relay state, DVCC settings |
 | `alerting.py` | Cerbo buzzer activation, D-Bus alarm path |
-| `charge_guard.py` | `DischargeGuard` — trips when the isolated Trojan bank discharges (< -5A for ~2 min) during a charge/EQ loop; `MIN_POLLS_AT_TARGET` |
+| `charge_guard.py` | `DischargeGuard` — trips when the isolated Trojan bank discharges (< -5A for ~2 min) during a charge/EQ loop; `TailWindow` — tail-current completion over 6 polls; `MIN_POLLS_AT_TARGET` |
 | `lock.py` | Atomic file lock (`O_EXCL`) preventing concurrent charge + EQ |
 | `aggregate_driver.py` | Start/stop dbus-aggregate-batteries via `svc -u/-d` |
 | `web_engine.py` | Closed HTTP dashboard engine (`/api/status`, `/api/config`, control POSTs, origin-validated CORS), configured by each service's Operation profile |
@@ -114,7 +114,7 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 - Web dashboards have Abort button (visible during active operations, triggers safe cleanup via finally block)
 - Safe-hold reconnect: the relay is auto-closed ONLY when the Trojan↔LFP delta is within `RELAY_CLOSE_DELTA_MAX` (1V). On any exit with the relay still open, the system never tears down DVCC — it holds the bus on the temp battery and alarms (`Takeover.teardown` / `wait_for_match` safe-hold). There is no "last-resort" high-delta auto-close; the operator restores power or closes relay 2 manually. (Supersedes the earlier delta-aware-`finally` auto-close behaviour.)
 - During a takeover ESS is forced to "Keep batteries charged" (`/Settings/CGwacs/BatteryLife/State` = 9) before relay 2 opens and restored in teardown. ESS "Optimized" otherwise discharges the isolated Trojan bank to its min SoC even on shore power (2026-10-03: 99% → 29%, 20.45V)
-- A charge/EQ run only counts as done if the tail current was reached at the target voltage, or the target was held for 30 min (`MIN_POLLS_AT_TARGET`) before the timeout; anything else, or a discharging bank, reconnects, alarms and does not advance the schedule. A failed run is not retried on the schedule for 24h (EQ) / 1h (charge) (`RETRY_BACKOFF_SEC`, in memory); Run Now overrides. The takeover refuses to open the relay if the ESS mode cannot be read
+- Tail current is judged on a 3-minute window (`TailWindow`: 6 polls, mean current below the threshold, at target voltage for most of them), never on one sample. A charge/EQ run only counts as done if the tail current was reached at the target voltage, or the target was held for 30 min (`MIN_POLLS_AT_TARGET`) before the timeout; anything else, or a discharging bank, reconnects, alarms and does not advance the schedule. A failed run is not retried on the schedule for 24h (EQ) / 1h (charge) (`RETRY_BACKOFF_SEC`, in memory); Run Now overrides. The takeover refuses to open the relay if the ESS mode cannot be read
 - The DVCC originals snapshot lives on `/data` (`fla-shared/dvcc_originals.json`); a snapshot left by a dead run is finished by `recover_stale_takeover` (the real teardown, under the lock) from each service's idle tick
 - Isolation probe: after relay 2 opens, the takeover moves the temp battery CVL away from the bus voltage before the isolation check — up to the LFP-safe 28.4V when the bus is at least 0.5V below it, otherwise 1V down — and puts it back if the check fails. Without it, ESS keep-charged holds both banks level and the divergence check fails with the relay open (2026-10-04). The probe never exceeds 28.4V
 - `TempBatteryService.register` deletes a leftover `/tmp/fla_temp_cvl` first; the subprocess would otherwise adopt a killed run's 31.5V within 2s while relay 2 is still closed
@@ -124,8 +124,8 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (389 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 246 tests — shared modules
+# Run all tests (396 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 253 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 81 tests — EQ service (incl. 5 scenario tests)
 python3 -m unittest discover -s fla-charge/tests -v        # 62 tests — charge service (incl. 3 scenario tests)
 
