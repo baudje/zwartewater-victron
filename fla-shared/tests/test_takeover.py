@@ -716,10 +716,8 @@ class TestRebootIncident20261003(unittest.TestCase):
         self.assertFalse(os.path.exists(self._tmp + ".tmp"))
 
 
-class TestEssKeepCharged(unittest.TestCase):
-    """2026-10-03: ESS "Optimized" (min SoC 20%) fed the boat from the isolated
-    Trojans on shore power, 99% -> 29%. The takeover forces "Keep batteries
-    charged" while the LFP bank is isolated and restores the mode afterwards."""
+class _HandoffCase(unittest.TestCase):
+    """A handoff against mocked relay/aggregate/temp battery, with its own snapshot file."""
 
     def setUp(self):
         self._tmp = os.path.join(os.path.dirname(__file__), "_snap_ess.json")
@@ -735,6 +733,12 @@ class TestEssKeepCharged(unittest.TestCase):
         MockTBS.return_value = MagicMock(**{"register.return_value": True})
         t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
         return t, t.hand_off_in(safe_voltage=28.4, target_voltage=31.5)
+
+
+class TestEssKeepCharged(_HandoffCase):
+    """2026-10-03: ESS "Optimized" (min SoC 20%) fed the boat from the isolated
+    Trojans on shore power, 99% -> 29%. The takeover forces "Keep batteries
+    charged" while the LFP bank is isolated and restores the mode afterwards."""
 
     @patch('takeover.aggregate_driver')
     @patch('takeover.relay_control')
@@ -823,6 +827,72 @@ class TestEssKeepCharged(unittest.TestCase):
         self.assertEqual(monitor.get_ess_state(), takeover.ESS_KEEP_CHARGED)
         monitor._relay_state = 1
         t.teardown()
+        self.assertEqual(monitor.get_ess_state(), 10)
+
+
+class TestSharedVoltageSenseOff(_HandoffCase):
+    """2026-10-04: with shared voltage sense on, the Quattro regulated on a
+    voltage ~4s old and the charge voltage rang after every load step."""
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_off_before_the_relay_opens_and_restored(self, MockTBS, mrelay, magg, mrel):
+        monitor = MockMonitor(bms_instance=99)
+        order = []
+        real_set = monitor.set_shared_voltage_sense
+        monitor.set_shared_voltage_sense = lambda v: order.append("svs=%s" % v) or real_set(v)
+        t = takeover.Takeover(monitor, self.status, self.alerting, "fla-charge", _states())
+        magg.stop.return_value = True
+        mrelay.open_relay.side_effect = lambda *a, **k: order.append("open") or True
+        mrelay.verify_relay_open.return_value = True
+        MockTBS.return_value = MagicMock(**{"register.return_value": True})
+        self.assertTrue(t.hand_off_in(safe_voltage=28.4, target_voltage=29.8))
+        self.assertEqual(order, ["svs=0", "open"])
+        self.assertEqual(takeover.load_originals()["shared_voltage_sense"], 1)
+        monitor._relay_state = 1
+        t.teardown()
+        self.assertEqual(monitor.get_shared_voltage_sense(), 1)
+        self.assertIsNone(takeover.load_originals())
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_left_alone_when_it_was_off_or_unreadable(self, MockTBS, mrelay, magg, mrel):
+        for original in (0, None):
+            monitor = MockMonitor(bms_instance=99, shared_voltage_sense=original)
+            monitor.set_shared_voltage_sense = MagicMock()
+            t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+            self.assertTrue(ok)
+            monitor._relay_state = 1
+            t.teardown()
+            monitor.set_shared_voltage_sense.assert_not_called()
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_failed_switch_off_does_not_fail_the_handoff(self, MockTBS, mrelay, magg, mrel):
+        monitor = MockMonitor(bms_instance=99)
+        monitor.set_shared_voltage_sense = MagicMock(return_value=False)
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        self.assertTrue(ok)
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_failed_restore_is_retried_but_does_not_block_the_services(self, MockTBS, mrelay, magg, mrel):
+        # A kept snapshot pre-empts every idle tick; SVS is not worth that.
+        monitor = MockMonitor(bms_instance=99)
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        monitor._relay_state = 1
+        monitor.set_shared_voltage_sense = MagicMock(return_value=False)
+        t.teardown()
+        self.assertEqual(monitor.set_shared_voltage_sense.call_count, 3)
+        self.assertIsNone(takeover.load_originals())
         self.assertEqual(monitor.get_ess_state(), 10)
 
 

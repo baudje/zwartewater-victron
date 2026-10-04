@@ -117,6 +117,7 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 - Tail current is judged on a 3-minute window (`TailWindow`: 6 polls, mean current below the threshold, at target voltage for most of them), never on one sample. A charge/EQ run only counts as done if the tail current was reached at the target voltage, or the target was held for 30 min (`MIN_POLLS_AT_TARGET`) before the timeout; anything else, or a discharging bank, reconnects, alarms and does not advance the schedule. A failed run is not retried on the schedule for 24h (EQ) / 1h (charge) (`RETRY_BACKOFF_SEC`, in memory); Run Now overrides. The takeover refuses to open the relay if the ESS mode cannot be read
 - The DVCC originals snapshot lives on `/data` (`fla-shared/dvcc_originals.json`); a snapshot left by a dead run is finished by `recover_stale_takeover` (the real teardown, under the lock) from each service's idle tick
 - Isolation probe: after relay 2 opens, the takeover moves the temp battery CVL away from the bus voltage before the isolation check — up to the LFP-safe 28.4V when the bus is at least 0.5V below it, otherwise 1V down — and puts it back if the check fails. Without it, ESS keep-charged holds both banks level and the divergence check fails with the relay open (2026-10-04). The probe never exceeds 28.4V
+- Shared voltage sense (`/Settings/SystemSetup/SharedVoltageSense`) is switched off before relay 2 opens (only when it was on) and switched back on in teardown from the snapshot. Best effort both ways: a failed write only logs and never holds the snapshot. With it on, the Quattro regulates on the temp battery's voltage, which arrives ~4s late, and the charge voltage rings for 1–2 min after a load step (2026-10-04: 27.6–30.06V at a 29.8V target)
 - `TempBatteryService.register` deletes a leftover `/tmp/fla_temp_cvl` first; the subprocess would otherwise adopt a killed run's 31.5V within 2s while relay 2 is still closed
 - Temperature compensation adjusts all target voltages per Trojan datasheet (reads from JK BMS sensor)
 - All settings exposed via Venus OS D-Bus settings and web UIs
@@ -124,8 +125,8 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (396 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 253 tests — shared modules
+# Run all tests (400 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 257 tests — shared modules
 python3 -m unittest discover -s fla-equalisation/tests -v  # 81 tests — EQ service (incl. 5 scenario tests)
 python3 -m unittest discover -s fla-charge/tests -v        # 62 tests — charge service (incl. 3 scenario tests)
 

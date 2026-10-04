@@ -41,6 +41,7 @@ class SimBoat:
         self.bms_instance = AGGREGATE_INSTANCE
         self.max_charge_voltage = 32.0
         self.ess_state = ess_state
+        self.shared_voltage_sense = 1
         # volatile state
         self.relay = 1
         self.temp_cvl = None          # temp battery CVL; None = subprocess not running
@@ -58,6 +59,7 @@ class SimBoat:
         self.isolated_discharge_s = 0.0   # relay open AND Trojans discharging > 5A
         self.bms_lost_s = 0.0             # DVCC selects a BMS that is not running
         self.relay_open_s = 0.0
+        self.svs_at_high_cvl_s = 0.0      # isolated, CVL above LFP-safe, Quattro on the late sense voltage
         self.lfp_overvoltage_s = 0.0      # relay closed while DVCC's CVL is above LFP-safe 28.4V
         self.min_v_trojan = self.v_trojan
         self.peak_v_trojan = self.v_trojan
@@ -105,6 +107,8 @@ class SimBoat:
             self.v_trojan = self.v_lfp
         else:
             self.relay_open_s += dt
+            if cvl is not None and cvl > 28.45 and self.shared_voltage_sense:
+                self.svs_at_high_cvl_s += dt
             # On the Orion a full LFP bank barely moves (28.84V -> 28.13V in 11
             # hours on 2026-10-04).
             if self.v_lfp > 27.0:
@@ -185,6 +189,12 @@ class SimBoat:
         if not self.ess_writable:
             return False
         self.ess_state = state
+        return True
+
+    def get_shared_voltage_sense(self): return self.shared_voltage_sense
+
+    def set_shared_voltage_sense(self, value):
+        self.shared_voltage_sense = value
         return True
 
     def _alive(self, instance):
