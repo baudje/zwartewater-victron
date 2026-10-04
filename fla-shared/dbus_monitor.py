@@ -372,6 +372,29 @@ class DbusMonitor:
             log.error("Failed to set DVCC MaxChargeVoltage: %s", e)
             return False
 
+    def get_ess_state(self):
+        """Read the ESS BatteryLife state (9 = keep batteries charged, 10 =
+        optimized without BatteryLife). None when ESS is not installed."""
+        return _get_dbus_value(
+            self.bus, "com.victronenergy.settings",
+            "/Settings/CGwacs/BatteryLife/State",
+        )
+
+    def set_ess_state(self, state):
+        """Set the ESS BatteryLife state. Returns True on success."""
+        try:
+            obj = self.bus.get_object(
+                "com.victronenergy.settings",
+                "/Settings/CGwacs/BatteryLife/State",
+            )
+            iface = dbus.Interface(obj, "com.victronenergy.BusItem")
+            iface.SetValue(dbus.Int32(state))
+            log.info("ESS BatteryLife state set to %d", state)
+            return True
+        except dbus.exceptions.DBusException as e:
+            log.error("Failed to set ESS BatteryLife state: %s", e)
+            return False
+
     def invalidate_services(self):
         """Force re-discovery of SmartShunt services."""
         self._lfp_service = None

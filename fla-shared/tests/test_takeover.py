@@ -716,5 +716,115 @@ class TestRebootIncident20261003(unittest.TestCase):
         self.assertFalse(os.path.exists(self._tmp + ".tmp"))
 
 
+class TestEssKeepCharged(unittest.TestCase):
+    """2026-10-03: ESS "Optimized" (min SoC 20%) fed the boat from the isolated
+    Trojans on shore power, 99% -> 29%. The takeover forces "Keep batteries
+    charged" while the LFP bank is isolated and restores the mode afterwards."""
+
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_ess.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+        self.alerting = MagicMock()
+        self.status = MockStatus()
+
+    def _handoff(self, monitor, mrelay, magg, MockTBS):
+        magg.stop.return_value = True
+        mrelay.open_relay.return_value = True
+        mrelay.verify_relay_open.return_value = True
+        MockTBS.return_value = MagicMock(**{"register.return_value": True})
+        t = takeover.Takeover(monitor, self.status, self.alerting, "fla-equalisation", _states())
+        return t, t.hand_off_in(safe_voltage=28.4, target_voltage=31.5)
+
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_keep_charged_set_before_relay_opens_and_snapshotted(self, MockTBS, mrelay, magg):
+        monitor = MockMonitor(bms_instance=99, ess_state=10)
+        order = []
+        monitor.set_ess_state = MagicMock(side_effect=lambda v: order.append("ess=%s" % v) or True)
+        mrelay.open_relay.side_effect = lambda *a, **k: order.append("open") or True
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        self.assertTrue(ok)
+        self.assertEqual(order, ["ess=%d" % takeover.ESS_KEEP_CHARGED, "open"])
+        self.assertEqual(takeover.load_originals()["ess_state"], 10)
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_relay_stays_closed_when_keep_charged_cannot_be_set(self, MockTBS, mrelay, magg, mrel):
+        monitor = MockMonitor(bms_instance=99, ess_state=10)
+        monitor.set_ess_state = MagicMock(return_value=False)
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        self.assertFalse(ok)
+        mrelay.open_relay.assert_not_called()
+
+    @patch('takeover.time')
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_unreadable_ess_mode_keeps_relay_closed(self, MockTBS, mrelay, magg, mrel, mtime):
+        # None is what a timed-out D-Bus read returns; it must not pass as "no ESS".
+        monitor = MockMonitor(bms_instance=99, ess_state=None)
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        self.assertFalse(ok)
+        mrelay.open_relay.assert_not_called()
+
+    @patch('takeover.time')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_ess_read_is_retried(self, MockTBS, mrelay, magg, mtime):
+        monitor = MockMonitor(bms_instance=99)
+        monitor.get_ess_state = MagicMock(side_effect=[None, 10, 9, 9])
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        self.assertTrue(ok)
+        self.assertEqual(takeover.load_originals()["ess_state"], 10)
+
+    def _torn_down(self, MockTBS, mrelay, magg, mutate):
+        monitor = MockMonitor(bms_instance=99, ess_state=10)
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        monitor._relay_state = 1
+        mutate(monitor)
+        t.teardown()
+        return monitor
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_failed_ess_restore_keeps_snapshot_for_retry(self, MockTBS, mrelay, magg, mrel):
+        def fail_writes(m):
+            m.set_ess_state = MagicMock(return_value=False)
+        self._torn_down(MockTBS, mrelay, magg, fail_writes)
+        self.assertEqual(takeover.load_originals()["ess_state"], 10)
+        mrel.assert_called_once()
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_operator_ess_change_during_run_is_kept(self, MockTBS, mrelay, magg, mrel):
+        def operator_switches(m):
+            m._ess_state = 12
+        monitor = self._torn_down(MockTBS, mrelay, magg, operator_switches)
+        self.assertEqual(monitor.get_ess_state(), 12)
+        self.assertIsNone(takeover.load_originals())
+
+    @patch('takeover.release_lock')
+    @patch('takeover.aggregate_driver')
+    @patch('takeover.relay_control')
+    @patch('takeover.TempBatteryService')
+    def test_teardown_restores_the_ess_mode(self, MockTBS, mrelay, magg, mrel):
+        monitor = MockMonitor(bms_instance=99, ess_state=10)
+        t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
+        self.assertEqual(monitor.get_ess_state(), takeover.ESS_KEEP_CHARGED)
+        monitor._relay_state = 1
+        t.teardown()
+        self.assertEqual(monitor.get_ess_state(), 10)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -788,5 +788,120 @@ class TestRunHistoryRecords(unittest.TestCase):
         self.assertEqual(recs[0]["outcome"], "failed")
 
 
+class TestIncident20261003Guards(unittest.TestCase):
+    """2026-10-03: the absorption loop has the same shape as the EQ loop, which ran 150 min while the Trojans discharged at -50A
+    (logged as "High Trojan charge current"), timed out without ever reaching
+    the target, and was then recorded as a successful equalisation."""
+
+    def _run(self, monitor, times):
+        settings, status = MockChargeSettings(), MockStatus()
+        with patch('fla_charge.time') as mt, \
+                patch('fla_charge.acquire_lock', return_value=True), \
+                patch('fla_charge.verify_relay_still_open', return_value=True), \
+                patch('fla_charge.check_abort', return_value=False), \
+                patch('fla_charge.update_cache'), \
+                patch('fla_charge.is_ac_available', return_value=True), \
+                patch('fla_charge.get_max_lfp_cell_voltage', return_value=3.40), \
+                patch('fla_charge.append_run'), \
+                patch('fla_charge.alerting.clear_alarm') as mclear, \
+                patch('fla_charge.alerting.raise_alarm') as malarm, \
+                patch('fla_charge.write_last_charge') as mwrite, \
+                patch('fla_charge.Takeover') as MockT:
+            mt.time.side_effect = times
+            mt.sleep = MagicMock()
+            inst = MagicMock()
+            inst.hand_off_in.return_value = True
+            inst.hand_back.return_value = (True, 0.4)
+            MockT.return_value = inst
+            result = run_charge(settings, monitor, status)
+        return result, inst, mwrite, malarm, mclear, status, mt
+
+    def test_discharging_bank_stops_the_run_and_reconnects(self):
+        monitor = MockMonitor(trojan_voltage=24.4, trojan_current=-45.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, list(range(0, 3000, 30)))
+        self.assertFalse(result)
+        inst.hand_back.assert_called_once()       # controlled reconnect, not a hard stop
+        mwrite.assert_not_called()                # interval not advanced
+        self.assertTrue(malarm.called)
+        mclear.assert_not_called()                # the alarm stays up
+        self.assertIn(STATE_ERROR, status.states)
+        self.assertLess(mt.sleep.call_count, 10)  # minutes, not the full timeout
+
+    def test_timeout_without_reaching_target_is_not_a_success(self):
+        monitor = MockMonitor(trojan_voltage=27.0, trojan_current=30.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, [0, 1, 2, 10, 99999, 99999, 99999])
+        self.assertFalse(result)
+        inst.hand_back.assert_called_once()
+        mwrite.assert_not_called()
+        self.assertTrue(malarm.called)
+
+    def test_timeout_after_holding_target_still_counts(self):
+        import itertools
+        monitor = MockMonitor(trojan_voltage=29.64, trojan_current=30.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, itertools.count(0, 30))
+        self.assertTrue(result)
+        mwrite.assert_called_once()
+
+    def test_briefly_touching_target_is_not_a_success(self):
+        import itertools
+        monitor = MockMonitor(trojan_current=30.0, lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        monitor.get_trojan_voltage = MagicMock(
+            side_effect=itertools.chain([29.64] * 4, itertools.repeat(27.0)))
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, itertools.count(0, 30))
+        self.assertFalse(result)
+        mwrite.assert_not_called()
+
+    def test_small_discharge_at_target_is_not_completion(self):
+        import itertools
+        monitor = MockMonitor(trojan_voltage=29.64, trojan_current=-1.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, itertools.count(0, 30))
+        self.assertGreater(mt.sleep.call_count, 10)   # did not "complete" on the first poll
+
+
+class TestRetryBackoff(unittest.TestCase):
+    """2026-10-03: EQ run 3 started 3 seconds after run 2 failed."""
+
+    def _service(self):
+        from fla_charge import FlaChargeService
+        svc = FlaChargeService.__new__(FlaChargeService)
+        svc.settings = MagicMock(run_now=False)
+        svc.monitor = MagicMock()
+        svc.status = MagicMock()
+        svc._running = False
+        svc._failed = False
+        svc._update_idle_status = lambda: None
+        return svc
+
+    @patch('fla_charge.verify_idle_bms_selection')
+    @patch('fla_charge.run_charge', return_value=False)
+    @patch('fla_charge.should_run', return_value=True)
+    def test_failed_run_is_not_retried_on_the_next_tick(self, _sr, mrun, _g):
+        svc = self._service()
+        with patch('fla_charge.threading.Thread') as mthread:
+            svc._check()
+            mthread.call_args.kwargs["target"]()      # run the worker inline
+            self.assertEqual(mrun.call_count, 1)
+            svc._check()
+            self.assertEqual(mthread.call_count, 1, "no second run inside the backoff")
+            svc.settings.run_now = True               # the operator can still force one
+            svc._check()
+            self.assertEqual(mthread.call_count, 2)
+
+    @patch('fla_charge.verify_idle_bms_selection')
+    @patch('fla_charge.lock_is_locked', return_value=True)
+    @patch('fla_charge.should_run', return_value=True)
+    def test_other_service_holding_the_lock_is_not_a_failed_run(self, msr, _lk, _g):
+        svc = self._service()
+        with patch('fla_charge.threading.Thread') as mthread:
+            svc._check()
+        mthread.assert_not_called()
+        msr.assert_not_called()                 # RunNow not consumed
+        self.assertEqual(svc._retry_after, 0.0)  # backoff not armed
+
+
 if __name__ == '__main__':
     unittest.main()

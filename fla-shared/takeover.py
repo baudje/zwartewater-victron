@@ -39,6 +39,8 @@ TEMP_SERVICE = "com.victronenergy.battery/100"
 # restore key on this.
 AGGREGATE_INSTANCE = 99
 TEMP_CHARGE_CURRENT = 60.0  # FLA recommended max bulk current
+# /Settings/CGwacs/BatteryLife/State value for ESS "Keep batteries charged".
+ESS_KEEP_CHARGED = 9
 # After restart_systemcalc() returns, systemcalc's slow post-restart D-Bus scan
 # on Venus OS v3.80~33 keeps the bus congested, so the temp battery (instance
 # 100) can take far longer than the wait_for_service_instance 10s default to
@@ -56,7 +58,7 @@ TakeoverStates = namedtuple(
 )
 
 
-def save_originals(battery_service, bms_instance, max_charge_voltage):
+def save_originals(battery_service, bms_instance, max_charge_voltage, ess_state=None):
     """Persist the DVCC originals snapshot. Returns True on success."""
     # Atomic (tmp + fsync + replace): on /data a power loss mid-write must not
     # leave a truncated snapshot that reads back as "originals lost".
@@ -67,6 +69,7 @@ def save_originals(battery_service, bms_instance, max_charge_voltage):
                 "battery_service": battery_service,
                 "bms_instance": bms_instance,
                 "max_charge_voltage": max_charge_voltage,
+                "ess_state": ess_state,
             }, f)
             f.flush()
             os.fsync(f.fileno())
@@ -190,6 +193,16 @@ class Takeover:
         self.teardown()
         return False
 
+    def _read_ess_state(self):
+        """ESS BatteryLife state, retried: right after the systemcalc restart the
+        bus is congested and a single read can time out to None."""
+        for _ in range(3):
+            state = self.monitor.get_ess_state()
+            if state is not None:
+                return state
+            time.sleep(1)
+        return None
+
     def hand_off_in(self, safe_voltage, target_voltage, charge_current=TEMP_CHARGE_CURRENT):
         """Run the ordered handoff: temp battery at safe voltage, stop aggregate,
         restart systemcalc, snapshot+persist DVCC originals, switch DVCC to the
@@ -243,10 +256,11 @@ class Takeover:
             "battery_service": self.monitor.get_battery_service_setting(),
             "bms_instance": self.monitor.get_bms_instance(),
             "max_charge_voltage": self.monitor.get_dvcc_max_charge_voltage(),
+            "ess_state": self._read_ess_state(),
         }
         self._originals = originals
         save_originals(originals["battery_service"], originals["bms_instance"],
-                       originals["max_charge_voltage"])
+                       originals["max_charge_voltage"], originals["ess_state"])
         log.info("Saving BatteryService=%s, BmsInstance=%s, DVCC MaxChargeVoltage=%s",
                  originals["battery_service"], originals["bms_instance"],
                  originals["max_charge_voltage"])
@@ -267,6 +281,17 @@ class Takeover:
         # relay is still closed, so teardown reconnects cleanly with no alarm.
         if self._should_abort():
             return self._abort("Abort before LFP disconnect")
+
+        # ESS "Optimized" discharges the selected battery down to its minimum SoC
+        # even on shore power, and the selected battery is about to be the
+        # isolated Trojan bank (2026-10-03: 99% -> 29% during an "equalisation").
+        # Force "Keep batteries charged" until teardown restores the saved mode.
+        # Fail closed: an unreadable mode must not be taken for "no ESS".
+        if originals["ess_state"] is None:
+            return self._fail("Cannot read the ESS mode — not isolating the LFP bank")
+        if originals["ess_state"] != ESS_KEEP_CHARGED:
+            if not self.monitor.set_ess_state(ESS_KEEP_CHARGED):
+                return self._fail("Failed to set ESS to keep-batteries-charged")
 
         # 6. Open relay 2 (isolate the LFP bank) — only now that DVCC is the temp battery.
         self.status.update(state=self.states.disconnecting)
@@ -394,6 +419,21 @@ class Takeover:
                         log.info("DVCC MaxChargeVoltage restored to %s", originals["max_charge_voltage"])
                     except Exception:
                         log.error("CRITICAL: Failed to restore DVCC MaxChargeVoltage")
+                # Restore the ESS mode only if this takeover changed it AND it is
+                # still what we set: an operator who switched it mid-run keeps
+                # their choice. A failed read/write keeps the snapshot (confirmed
+                # = False) so recover_stale_takeover retries on the next tick.
+                ess = originals.get("ess_state")
+                if ess not in (None, ESS_KEEP_CHARGED):
+                    current = self.monitor.get_ess_state()
+                    if current == ESS_KEEP_CHARGED and self.monitor.set_ess_state(ess):
+                        log.info("ESS BatteryLife state restored to %s", ess)
+                    elif current is None or current == ESS_KEEP_CHARGED:
+                        log.error("CRITICAL: Failed to restore the ESS mode (%s) — "
+                                  "will retry", ess)
+                        confirmed = False
+                    else:
+                        log.info("ESS mode changed during the run (now %s) — leaving it", current)
 
         # The temp battery is no longer the selected BMS — safe to deregister.
         if self.temp_service is not None:

@@ -32,8 +32,9 @@ from settings import Settings
 import alerting
 from alerting import raise_alarm, clear_alarm
 from relay_control import verify_relay_still_open, startup_safety_check
+from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET
 from temp_compensation import compensate as temp_compensate
-from lock import acquire as acquire_lock, release as release_lock
+from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
 from run_history import append_run
 # One closed engine, configured by this service's Operation profile
 # (ADR-0002). Module-level bindings keep every call site — and the test
@@ -75,6 +76,9 @@ LAST_EQ_FILE = "/data/apps/fla-equalisation/last_equalisation"
 # One JSON line per finished run (success/aborted/failed) — issue #25.
 RUN_HISTORY_FILE = "/data/apps/fla-equalisation/run-history.jsonl"
 CHECK_INTERVAL_SEC = 60  # Check conditions every 60 seconds
+# A failed equalisation is not retried on the schedule until the next day: each
+# attempt isolates the LFP bank for hours. Run Now overrides.
+RETRY_BACKOFF_SEC = 24 * 3600
 
 
 def read_last_equalisation():
@@ -167,6 +171,10 @@ def run_equalisation(settings, monitor, status):
         eq_start = time.time()
         eq_timeout = settings.eq_timeout_hours * 3600
         i_trojan_none_count = 0
+        discharge_guard = DischargeGuard()
+        polls_at_target = 0
+        completed = False  # tail current reached at the target voltage
+        failure = None  # set when the run reconnects but did not equalise
 
         while True:
             elapsed = time.time() - eq_start
@@ -209,11 +217,21 @@ def run_equalisation(settings, monitor, status):
             else:
                 i_trojan_none_count = 0
 
-            if i_trojan is not None and abs(i_trojan) > 60:
-                log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", abs(i_trojan))
+            if i_trojan is not None and i_trojan > 60:
+                log.warning("High Trojan charge current: %.1fA (dynamo/MPPT active?)", i_trojan)
+
+            # A bank that is being discharged is not being charged: stop and
+            # reconnect instead of running out the timeout (2026-10-03).
+            if discharge_guard.tripped(i_trojan):
+                failure = ("Trojan bank discharging during equalisation (%.1fA at %.1fV) — "
+                           "no charge reaching it" % (i_trojan, v_trojan))
+                log.error(failure)
+                break
 
             voltage_reached = v_trojan is not None and v_trojan >= (eq_voltage - 0.1)
-            if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.eq_current_complete:
+            polls_at_target += voltage_reached
+            if voltage_reached and i_trojan is not None and 0 <= i_trojan < settings.eq_current_complete:
+                completed = True
                 log.info("Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
                          v_trojan, eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60)
                 break
@@ -237,6 +255,15 @@ def run_equalisation(settings, monitor, status):
 
         run_record["minutes_at_target"] = round(elapsed / 60, 1)
 
+        # A timeout (or lost current reading) below the target voltage is not an
+        # equalisation: reconnect, but alarm and do not advance the interval.
+        if (failure is None and not completed and not aborted_by_operator
+                and polls_at_target < MIN_POLLS_AT_TARGET):
+            failure = "Equalisation ended without holding %.1fV (peak %.1fV)" % (
+                eq_voltage, run_record["peak_trojan_voltage"] or 0)
+        if failure:
+            raise_alarm(failure, status_service=status)
+
         # Hand back: float-hold, close, guarded teardown.
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -250,6 +277,10 @@ def run_equalisation(settings, monitor, status):
         run_record["reconnect_delta"] = delta
         if not matched:
             status.update(state=STATE_ERROR)
+            return False
+
+        if failure:
+            status.update(state=STATE_ERROR)  # reconnected safely; the alarm stays up
             return False
 
         run_record["outcome"] = "aborted" if aborted_by_operator else "success"
@@ -277,6 +308,8 @@ def run_equalisation(settings, monitor, status):
 
 class FlaEqualisationService:
     """Persistent service that checks conditions and runs equalisation."""
+
+    _retry_after = 0.0  # time.monotonic(); scheduled runs wait until then after a failure
 
     def __init__(self):
         # Build the monitor first (cheap — no D-Bus scan; service discovery is
@@ -445,7 +478,12 @@ class FlaEqualisationService:
             if not self._failed:
                 self._update_idle_status()
 
-            if should_run(self.settings, self.monitor):
+            # After a failed run, wait before retrying on the schedule (2026-10-03:
+            # run 3 started 3 seconds after run 2 failed). RunNow still forces one.
+            backing_off = time.monotonic() < self._retry_after and not self.settings.run_now
+            # The other service mid-operation is not a failed run of ours: skip
+            # the tick without consuming RunNow or arming the backoff.
+            if not backing_off and not lock_is_locked() and should_run(self.settings, self.monitor):
                 self._running = True
                 self._failed = False
                 _engine.clear_run_now()  # discard any queued web RunNow once the run starts
@@ -463,6 +501,8 @@ class FlaEqualisationService:
                         log.exception("Worker thread error: %s", e)
                         self._failed = True
                     finally:
+                        if not success:  # armed BEFORE _running clears: no tick can slip in
+                            self._retry_after = time.monotonic() + RETRY_BACKOFF_SEC
                         self._running = False
                         if success:
                             self._failed = False

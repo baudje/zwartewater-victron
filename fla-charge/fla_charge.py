@@ -23,7 +23,8 @@ from gi.repository import GLib
 from dbus_monitor import DbusMonitor
 from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
 from relay_control import verify_relay_still_open, startup_safety_check
-from lock import acquire as acquire_lock, release as release_lock
+from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET
+from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
 from run_history import append_run
 from temp_compensation import compensate as temp_compensate
 import alerting
@@ -71,6 +72,7 @@ LAST_CHARGE_FILE = "/data/apps/fla-charge/last_charge"
 # One JSON line per finished run (success/aborted/failed) — issue #25.
 RUN_HISTORY_FILE = "/data/apps/fla-charge/run-history.jsonl"
 CHECK_INTERVAL_SEC = 60
+RETRY_BACKOFF_SEC = 3600  # no scheduled retry for an hour after a failed run
 
 
 def read_last_charge():
@@ -271,6 +273,10 @@ def run_charge(settings, monitor, status):
         abs_start = time.time()
         abs_timeout = settings.fla_absorption_max_hours * 3600
         i_trojan_none_count = 0
+        discharge_guard = DischargeGuard()
+        polls_at_target = 0
+        completed = False  # tail current reached at the target voltage
+        failure = None  # set when the run reconnects but did not complete the charge
 
         while True:
             elapsed = time.time() - abs_start
@@ -331,12 +337,22 @@ def run_charge(settings, monitor, status):
                 i_trojan_none_count = 0
 
             # High current warning
-            if i_trojan is not None and abs(i_trojan) > 60:
-                log.warning("High Trojan charge current: %.1fA (dynamo/MPPT?)", abs(i_trojan))
+            if i_trojan is not None and i_trojan > 60:
+                log.warning("High Trojan charge current: %.1fA (dynamo/MPPT?)", i_trojan)
+
+            # A bank that is being discharged is not being charged: stop and
+            # reconnect instead of running out the timeout (2026-10-03).
+            if discharge_guard.tripped(i_trojan):
+                failure = ("Trojan bank discharging during absorption (%.1fA at %.1fV) — "
+                           "no charge reaching it" % (i_trojan, v_trojan))
+                log.error(failure)
+                break
 
             # Absorption complete — only after voltage reaches the target
             voltage_reached = v_trojan is not None and v_trojan >= (abs_voltage - 0.1)
-            if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.fla_absorption_complete_current:
+            polls_at_target += voltage_reached
+            if voltage_reached and i_trojan is not None and 0 <= i_trojan < settings.fla_absorption_complete_current:
+                completed = True
                 log.info("Absorption complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
                          v_trojan, abs_voltage, abs(i_trojan),
                          settings.fla_absorption_complete_current, elapsed / 60)
@@ -362,6 +378,15 @@ def run_charge(settings, monitor, status):
 
         run_record["minutes_at_target"] = round(elapsed / 60, 1)
 
+        # A timeout, AC loss or lost current reading below the target voltage is
+        # not a completed charge: reconnect, but alarm and do not record it.
+        if (failure is None and not completed and not aborted_by_operator
+                and polls_at_target < MIN_POLLS_AT_TARGET):
+            failure = "FLA charge ended without holding %.1fV (peak %.1fV)" % (
+                abs_voltage, run_record["peak_trojan_voltage"] or 0)
+        if failure:
+            alerting.raise_alarm(failure, status_service=status)
+
         # === PHASE 4: Hand back — float-hold, voltage-match, close, teardown ===
         update_cache(state=STATE_VOLTAGE_MATCHING)
         def _vm_cache_cb(**kwargs):
@@ -380,6 +405,10 @@ def run_charge(settings, monitor, status):
         run_record["reconnect_delta"] = delta
         if not matched:
             status.update(state=STATE_ERROR)
+            return False
+
+        if failure:
+            status.update(state=STATE_ERROR)  # reconnected safely; the alarm stays up
             return False
 
         run_record["outcome"] = "aborted" if aborted_by_operator else "success"
@@ -407,6 +436,8 @@ def run_charge(settings, monitor, status):
 
 class FlaChargeService:
     """Persistent service that checks conditions and runs FLA charge."""
+
+    _retry_after = 0.0  # time.monotonic(); scheduled runs wait until then after a failure
 
     def __init__(self):
         # Build the monitor first (cheap), read the live relay state, then do
@@ -562,7 +593,12 @@ class FlaChargeService:
             # Don't overwrite error state on subsequent ticks
             if not self._failed:
                 self._update_idle_status()
-            if should_run(self.settings, self.monitor):
+            # After a failed run, wait before retrying on the schedule (2026-10-03:
+            # run 3 started 3 seconds after run 2 failed). RunNow still forces one.
+            backing_off = time.monotonic() < self._retry_after and not self.settings.run_now
+            # The other service mid-operation is not a failed run of ours: skip
+            # the tick without consuming RunNow or arming the backoff.
+            if not backing_off and not lock_is_locked() and should_run(self.settings, self.monitor):
                 self._running = True
                 self._failed = False
                 _engine.clear_run_now()
@@ -580,6 +616,8 @@ class FlaChargeService:
                         log.exception("Worker thread error: %s", e)
                         self._failed = True
                     finally:
+                        if not success:  # armed BEFORE _running clears: no tick can slip in
+                            self._retry_after = time.monotonic() + RETRY_BACKOFF_SEC
                         self._running = False
                         if success:
                             self._failed = False
