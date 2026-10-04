@@ -305,6 +305,20 @@ class Takeover:
             if not self.monitor.set_ess_state(ESS_KEEP_CHARGED):
                 return self._fail("Failed to set ESS to keep-batteries-charged")
 
+        # With shared voltage sense on, the Quattro regulates on the temp battery's
+        # voltage, which reaches it ~4s late; after a load step the charge voltage
+        # then rings for a minute or two (2026-10-04: 27.6V..30.06V at a 29.8V
+        # target). Off, it regulates on its own terminals. Switched off HERE, at
+        # the safe voltage and well before the CVL is raised, so the Quattro has
+        # dropped the last sense value by then. Not safety-relevant: a failure
+        # only logs, and teardown switches it back on.
+        svs = originals["shared_voltage_sense"]
+        if svs != SVS_ON:
+            log.info("Shared voltage sense is %s — leaving it", svs)
+        elif not self.monitor.set_shared_voltage_sense(SVS_OFF):
+            log.warning("Could not switch shared voltage sense off — "
+                        "the charge voltage may swing after load changes")
+
         # 6. Open relay 2 (isolate the LFP bank) — only now that DVCC is the temp battery.
         self.status.update(state=self.states.disconnecting)
         v_bus = self.monitor.get_lfp_voltage() or safe_voltage
@@ -328,16 +342,6 @@ class Takeover:
             # at the probe voltage: back to the gentlest known-safe level.
             self.temp_service.set_charge_voltage(min(safe_voltage, v_bus))
             return self._fail("LFP not disconnected after relay open")
-
-        # With shared voltage sense on, the Quattro regulates on the temp battery's
-        # voltage, which reaches it ~4s late; after a load step the charge voltage
-        # then rings for a minute or two (2026-10-04: 27.6V..30.06V at a 29.8V
-        # target). Off, it regulates on its own terminals. Not safety-relevant:
-        # a failed read or write only logs, and teardown restores the setting.
-        if originals["shared_voltage_sense"] == SVS_ON:
-            if not self.monitor.set_shared_voltage_sense(SVS_OFF):
-                log.warning("Could not switch shared voltage sense off — "
-                            "the charge voltage may swing after load changes")
 
         # 7. Raise the DVCC ceiling and the temp battery CVL to the target.
         self.monitor.set_dvcc_max_charge_voltage(target_voltage + 0.5)  # headroom above target
@@ -473,20 +477,17 @@ class Takeover:
                         confirmed = False
                     else:
                         log.info("ESS mode changed during the run (now %s) — leaving it", current)
-                # Shared voltage sense: same rule as the ESS mode.
-                if originals.get("shared_voltage_sense") == SVS_ON:
-                    current = self.monitor.get_shared_voltage_sense()
-                    if current == SVS_ON:
-                        pass  # never switched off, or already restored
-                    elif current == SVS_OFF and self.monitor.set_shared_voltage_sense(SVS_ON):
+                # Shared voltage sense was on before the takeover: back on.
+                # (On/off has no third state to tell an operator's switch-off
+                # from ours, so the pre-takeover value wins.) Best effort — it
+                # is not worth holding the snapshot and blocking the services.
+                if (originals.get("shared_voltage_sense") == SVS_ON
+                        and self.monitor.get_shared_voltage_sense() != SVS_ON):
+                    if any(self.monitor.set_shared_voltage_sense(SVS_ON) for _ in range(3)):
                         log.info("Shared voltage sense restored to on")
-                    elif current in (None, SVS_OFF):
-                        log.error("CRITICAL: Failed to restore shared voltage sense — "
-                                  "will retry")
-                        confirmed = False
                     else:
-                        log.info("Shared voltage sense changed during the run (now %s) — "
-                                 "leaving it", current)
+                        log.error("CRITICAL: Failed to restore shared voltage sense — "
+                                  "switch it back on in DVCC")
 
         # The temp battery is no longer the selected BMS — safe to deregister.
         if self.temp_service is not None:

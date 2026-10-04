@@ -838,18 +838,18 @@ class TestSharedVoltageSenseOff(_HandoffCase):
     @patch('takeover.aggregate_driver')
     @patch('takeover.relay_control')
     @patch('takeover.TempBatteryService')
-    def test_off_after_the_isolation_check_and_restored(self, MockTBS, mrelay, magg, mrel):
+    def test_off_before_the_relay_opens_and_restored(self, MockTBS, mrelay, magg, mrel):
         monitor = MockMonitor(bms_instance=99)
         order = []
         real_set = monitor.set_shared_voltage_sense
         monitor.set_shared_voltage_sense = lambda v: order.append("svs=%s" % v) or real_set(v)
-        mrelay.verify_relay_open.side_effect = lambda *a, **k: order.append("verify") or True
         t = takeover.Takeover(monitor, self.status, self.alerting, "fla-charge", _states())
         magg.stop.return_value = True
-        mrelay.open_relay.return_value = True
+        mrelay.open_relay.side_effect = lambda *a, **k: order.append("open") or True
+        mrelay.verify_relay_open.return_value = True
         MockTBS.return_value = MagicMock(**{"register.return_value": True})
         self.assertTrue(t.hand_off_in(safe_voltage=28.4, target_voltage=29.8))
-        self.assertEqual(order, ["verify", "svs=0"])
+        self.assertEqual(order, ["svs=0", "open"])
         self.assertEqual(takeover.load_originals()["shared_voltage_sense"], 1)
         monitor._relay_state = 1
         t.teardown()
@@ -884,13 +884,16 @@ class TestSharedVoltageSenseOff(_HandoffCase):
     @patch('takeover.aggregate_driver')
     @patch('takeover.relay_control')
     @patch('takeover.TempBatteryService')
-    def test_failed_restore_keeps_snapshot_for_retry(self, MockTBS, mrelay, magg, mrel):
+    def test_failed_restore_is_retried_but_does_not_block_the_services(self, MockTBS, mrelay, magg, mrel):
+        # A kept snapshot pre-empts every idle tick; SVS is not worth that.
         monitor = MockMonitor(bms_instance=99)
         t, ok = self._handoff(monitor, mrelay, magg, MockTBS)
         monitor._relay_state = 1
         monitor.set_shared_voltage_sense = MagicMock(return_value=False)
         t.teardown()
-        self.assertEqual(takeover.load_originals()["shared_voltage_sense"], 1)
+        self.assertEqual(monitor.set_shared_voltage_sense.call_count, 3)
+        self.assertIsNone(takeover.load_originals())
+        self.assertEqual(monitor.get_ess_state(), 10)
 
 
 class TestIsolationCheckHasSomethingToSee(unittest.TestCase):
