@@ -118,10 +118,10 @@ The `_check()` + worker-thread pattern, `settings.py` base methods, the per-serv
 ## Testing
 
 ```bash
-# Run all tests (328 total)
-python3 -m unittest discover -s fla-shared/tests -v      # 209 tests — shared modules
-python3 -m unittest discover -s fla-equalisation/tests -v  # 68 tests — EQ service
-python3 -m unittest discover -s fla-charge/tests -v        # 51 tests — charge service
+# Run all tests (349 total)
+python3 -m unittest discover -s fla-shared/tests -v      # 228 tests — shared modules
+python3 -m unittest discover -s fla-equalisation/tests -v  # 69 tests — EQ service
+python3 -m unittest discover -s fla-charge/tests -v        # 52 tests — charge service
 
 # Run a single test file
 python3 -m unittest fla-shared/tests/test_relay_control.py -v

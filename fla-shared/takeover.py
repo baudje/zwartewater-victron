@@ -18,7 +18,7 @@ import aggregate_driver
 import relay_control
 import voltage_matching
 from temp_battery import TempBatteryService, is_temp_battery_running
-from lock import release as release_lock, is_locked as lock_is_locked
+from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 # dead temp battery. The 2026-10-03 reboot wiped the old /tmp snapshot, the next
 # run then snapshotted those takeover values as "originals", and its hand-back
 # restored BmsInstance=100 -> "BMS lost". A snapshot left behind with no live
-# operation is restored by the idle guard (verify_idle_bms_selection).
+# operation is finished by recover_stale_takeover (the real guarded teardown).
 SNAPSHOT_FILE = "/data/apps/fla-shared/dvcc_originals.json"
 
 TEMP_INSTANCE = 100
@@ -58,13 +58,19 @@ TakeoverStates = namedtuple(
 
 def save_originals(battery_service, bms_instance, max_charge_voltage):
     """Persist the DVCC originals snapshot. Returns True on success."""
+    # Atomic (tmp + fsync + replace): on /data a power loss mid-write must not
+    # leave a truncated snapshot that reads back as "originals lost".
+    tmp = SNAPSHOT_FILE + ".tmp"
     try:
-        with open(SNAPSHOT_FILE, "w") as f:
+        with open(tmp, "w") as f:
             json.dump({
                 "battery_service": battery_service,
                 "bms_instance": bms_instance,
                 "max_charge_voltage": max_charge_voltage,
             }, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SNAPSHOT_FILE)
         log.info("DVCC originals snapshot saved: %s / %s / %s",
                  battery_service, bms_instance, max_charge_voltage)
         return True
@@ -97,29 +103,6 @@ def delete_originals():
 _idle_bms_alarm_active = False
 
 
-def _restore_stale_originals(monitor):
-    """Restore DVCC from a snapshot left by an operation that never tore down
-    (e.g. a reboot mid-operation). Only with relay 2 closed: handing DVCC back
-    while the LFP bank is isolated is the free-fall the guarded teardown avoids.
-    Caller guarantees no operation holds the lock."""
-    originals = load_originals()
-    if originals is None or monitor.get_relay_state() != 1:
-        return
-    log.warning("Stale DVCC originals snapshot with no active operation — restoring %s",
-                originals)
-    try:
-        if originals.get("bms_instance") is not None:
-            monitor.set_bms_instance(originals["bms_instance"])
-        if originals.get("battery_service") is not None:
-            monitor.set_battery_service_setting(originals["battery_service"])
-        if originals.get("max_charge_voltage") is not None:
-            monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
-    except Exception:
-        log.exception("Failed to restore stale DVCC originals — keeping snapshot for retry")
-        return
-    delete_originals()
-
-
 def verify_idle_bms_selection(monitor, alerting, status=None):
     """Guard the DVCC controlling-BMS selection while NO FLA operation is active.
 
@@ -135,7 +118,6 @@ def verify_idle_bms_selection(monitor, alerting, status=None):
     global _idle_bms_alarm_active
     if lock_is_locked():
         return None  # an FLA op owns the DVCC selection right now
-    _restore_stale_originals(monitor)
     if monitor.get_bms_instance() == AGGREGATE_INSTANCE:
         if _idle_bms_alarm_active:
             log.info("DVCC BMS selection back on the aggregate (instance %d)",
@@ -221,6 +203,10 @@ class Takeover:
                 or self.monitor.get_battery_service_setting() == TEMP_SERVICE):
             self._alarm("DVCC still selects the temp battery from an earlier run — "
                         "not starting; re-select the aggregate in DVCC")
+            # We created nothing, so the caller's finally-teardown has nothing to
+            # undo: it must not delete an earlier run's snapshot or keep the lock.
+            self._torn_down = True
+            release_lock()
             return False
 
         # 1. Temp battery at a SAFE voltage first (crash-safe before the relay opens).
@@ -353,6 +339,7 @@ class Takeover:
         # at snapshot time; a None means the read glitched and writing it back
         # would corrupt the setting (set_battery_service_setting(None) writes the
         # literal string "None"; set_bms_instance(None) raises).
+        confirmed = True
         if self._dvcc_switched:
             originals = self._originals or load_originals()
             if originals is None:
@@ -395,6 +382,7 @@ class Takeover:
                         log.error("CRITICAL: DVCC BMS selection did not return to the "
                                   "aggregate after reconnect — the idle guard will "
                                   "alarm shortly; verify the DVCC controlling BMS")
+                        confirmed = False
                 if originals.get("max_charge_voltage") is not None:
                     # Restored here too (not only in hand_back): covers the edge
                     # where the relay closed without a hand_back — e.g. an external
@@ -417,7 +405,11 @@ class Takeover:
 
         # Delete the snapshot BEFORE releasing the lock, so the next operation to
         # acquire the lock can't have its fresh snapshot deleted out from under it.
-        delete_originals()
+        # Only a snapshot this takeover owns, and only once the selection is
+        # confirmed: an unconfirmed restore keeps it so recover_stale_takeover
+        # retries on the next idle tick instead of losing the originals.
+        if self._dvcc_switched and confirmed:
+            delete_originals()
         release_lock()
         self._torn_down = True
 
@@ -488,3 +480,39 @@ class Takeover:
         t._dvcc_switched = True       # the interrupted operation had switched DVCC
         log.warning("RESUME: adopted interrupted takeover (snapshot loaded)")
         return t
+
+
+def has_stale_snapshot():
+    """True if a DVCC originals snapshot exists while no operation holds the lock:
+    a takeover whose owner died (reboot, kill) before its teardown."""
+    return not lock_is_locked() and load_originals() is not None
+
+
+def recover_stale_takeover(monitor, status, alerting_mod, service_name, states):
+    """Finish a dead takeover by running the real guarded teardown under the
+    operation lock: restart + rediscover the aggregate, restore and confirm the
+    DVCC originals, stop a leftover temp battery. Returns True once torn down.
+
+    Relay 2 must be confirmed closed; an open or unreadable relay is left to the
+    resume path / safe-hold and the snapshot is kept for the next tick."""
+    if monitor.get_relay_state() != 1:
+        return False
+    if not acquire_lock(service_name):
+        return False
+    originals = load_originals()  # re-read under the lock
+    if originals is None:
+        release_lock()
+        return False
+    log.warning("Stale DVCC originals snapshot with no active operation — "
+                "finishing the interrupted teardown (%s)", originals)
+    t = Takeover(monitor, status, alerting_mod, service_name, states)
+    t._originals = originals
+    t._aggregate_stopped = True  # unknown after a crash; starting it is idempotent
+    t._dvcc_switched = True
+    if is_temp_battery_running():
+        t.temp_service = TempBatteryService(device_instance=TEMP_INSTANCE)
+        t.temp_service.attach()
+    t.teardown()
+    if not t._torn_down:
+        release_lock()  # relay opened under us — we hold nothing; retry next tick
+    return t._torn_down

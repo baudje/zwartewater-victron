@@ -39,7 +39,12 @@ On 2026-10-03 a reboot mid-EQ wiped the `/tmp` snapshot, the next run snapshotte
 ("BMS lost", 1.5h). Now:
 
 - the snapshot lives at `/data/apps/fla-shared/dvcc_originals.json`;
-- a snapshot found with no operation holding the lock and relay 2 closed is
-  restored and consumed by the idle guard (`verify_idle_bms_selection`);
+- a snapshot found with no operation holding the lock and relay 2 closed is a
+  dead takeover: `recover_stale_takeover` takes the lock and runs the real
+  guarded `teardown()` (aggregate start + rediscovery, restore, confirm), from
+  each service's idle tick. There is deliberately no second, lighter restore;
+- `teardown()` keeps the snapshot when the restored selection is not confirmed,
+  so the next idle tick retries instead of losing the originals;
+- the snapshot is written atomically (tmp + fsync + replace);
 - `hand_off_in` refuses to start while DVCC still selects the temp battery, so
   takeover values can never be snapshotted as originals.
