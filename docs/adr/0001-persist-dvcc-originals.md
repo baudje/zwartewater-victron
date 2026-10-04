@@ -28,3 +28,18 @@ are both deeper (one restore path) and correct.
   it only after a confirmed-closed teardown.
 - If the snapshot is ever missing on resume (e.g. wiped `/tmp`), the system must
   refuse to guess — hold and alarm rather than restore to a constant.
+
+## Amendment (2026-10-04): snapshot moved to `/data`
+
+The snapshot lived in `/tmp`, on the assumption that a full reboot ends the
+takeover cleanly. It doesn't: DVCC's `BmsInstance`/`BatteryService` are
+persistent settings and survive the reboot still pointing at the temp battery.
+On 2026-10-03 a reboot mid-EQ wiped the `/tmp` snapshot, the next run snapshotted
+`BmsInstance=100` as an "original", and its hand-back selected a dead service
+("BMS lost", 1.5h). Now:
+
+- the snapshot lives at `/data/apps/fla-shared/dvcc_originals.json`;
+- a snapshot found with no operation holding the lock and relay 2 closed is
+  restored and consumed by the idle guard (`verify_idle_bms_selection`);
+- `hand_off_in` refuses to start while DVCC still selects the temp battery, so
+  takeover values can never be snapshotted as originals.

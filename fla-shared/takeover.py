@@ -22,10 +22,13 @@ from lock import release as release_lock, is_locked as lock_is_locked
 
 log = logging.getLogger(__name__)
 
-# Volatile by design: survives a parent crash (where resume applies — the temp
-# battery subprocess is still alive), and is correctly gone after a full reboot
-# (where resume does NOT apply — relay 2 boot-closes and the subprocess dies).
-SNAPSHOT_FILE = "/tmp/fla_dvcc_originals.json"
+# Persistent (on /data), because the DVCC settings it protects are persistent
+# too: a reboot mid-operation leaves BmsInstance/BatteryService pointing at the
+# dead temp battery. The 2026-10-03 reboot wiped the old /tmp snapshot, the next
+# run then snapshotted those takeover values as "originals", and its hand-back
+# restored BmsInstance=100 -> "BMS lost". A snapshot left behind with no live
+# operation is restored by the idle guard (verify_idle_bms_selection).
+SNAPSHOT_FILE = "/data/apps/fla-shared/dvcc_originals.json"
 
 TEMP_INSTANCE = 100
 TEMP_SERVICE = "com.victronenergy.battery/100"
@@ -94,6 +97,29 @@ def delete_originals():
 _idle_bms_alarm_active = False
 
 
+def _restore_stale_originals(monitor):
+    """Restore DVCC from a snapshot left by an operation that never tore down
+    (e.g. a reboot mid-operation). Only with relay 2 closed: handing DVCC back
+    while the LFP bank is isolated is the free-fall the guarded teardown avoids.
+    Caller guarantees no operation holds the lock."""
+    originals = load_originals()
+    if originals is None or monitor.get_relay_state() != 1:
+        return
+    log.warning("Stale DVCC originals snapshot with no active operation — restoring %s",
+                originals)
+    try:
+        if originals.get("bms_instance") is not None:
+            monitor.set_bms_instance(originals["bms_instance"])
+        if originals.get("battery_service") is not None:
+            monitor.set_battery_service_setting(originals["battery_service"])
+        if originals.get("max_charge_voltage") is not None:
+            monitor.set_dvcc_max_charge_voltage(originals["max_charge_voltage"])
+    except Exception:
+        log.exception("Failed to restore stale DVCC originals — keeping snapshot for retry")
+        return
+    delete_originals()
+
+
 def verify_idle_bms_selection(monitor, alerting, status=None):
     """Guard the DVCC controlling-BMS selection while NO FLA operation is active.
 
@@ -109,6 +135,7 @@ def verify_idle_bms_selection(monitor, alerting, status=None):
     global _idle_bms_alarm_active
     if lock_is_locked():
         return None  # an FLA op owns the DVCC selection right now
+    _restore_stale_originals(monitor)
     if monitor.get_bms_instance() == AGGREGATE_INSTANCE:
         if _idle_bms_alarm_active:
             log.info("DVCC BMS selection back on the aggregate (instance %d)",
@@ -187,6 +214,15 @@ class Takeover:
         temp battery, confirm the BMS selection, open relay 2, raise CVL to the
         target. Returns True on success; on any failure tears down and returns
         False. The relay opens ONLY after the BMS selection is confirmed."""
+        # 0. DVCC still on the temp battery means an earlier takeover never tore
+        #    down. Its values are not originals; snapshotting them would make our
+        #    hand-back select a dead service (2026-10-03). Refuse, change nothing.
+        if (self.monitor.get_bms_instance() == TEMP_INSTANCE
+                or self.monitor.get_battery_service_setting() == TEMP_SERVICE):
+            self._alarm("DVCC still selects the temp battery from an earlier run — "
+                        "not starting; re-select the aggregate in DVCC")
+            return False
+
         # 1. Temp battery at a SAFE voltage first (crash-safe before the relay opens).
         self.temp_service = TempBatteryService(device_instance=TEMP_INSTANCE)
         if not self.temp_service.register(charge_voltage=safe_voltage,
