@@ -32,7 +32,7 @@ from settings import Settings
 import alerting
 from alerting import raise_alarm, clear_alarm
 from relay_control import verify_relay_still_open, startup_safety_check
-from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET
+from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET, TailWindow, TAIL_POLLS
 from temp_compensation import compensate as temp_compensate
 from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
 from run_history import append_run
@@ -172,6 +172,7 @@ def run_equalisation(settings, monitor, status):
         eq_timeout = settings.eq_timeout_hours * 3600
         i_trojan_none_count = 0
         discharge_guard = DischargeGuard()
+        tail = TailWindow()
         polls_at_target = 0
         completed = False  # tail current reached at the target voltage
         failure = None  # set when the run reconnects but did not equalise
@@ -230,10 +231,12 @@ def run_equalisation(settings, monitor, status):
 
             voltage_reached = v_trojan is not None and v_trojan >= (eq_voltage - 0.1)
             polls_at_target += voltage_reached
-            if voltage_reached and i_trojan is not None and 0 <= i_trojan < settings.eq_current_complete:
+            tail.add(voltage_reached, i_trojan)
+            if tail.complete(settings.eq_current_complete):
                 completed = True
-                log.info("Equalisation complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
-                         v_trojan, eq_voltage, abs(i_trojan), settings.eq_current_complete, elapsed / 60)
+                log.info("Equalisation complete: target %.1fV held, mean current %.1fA < %.1fA "
+                         "over the last %d polls (%.0f min)",
+                         eq_voltage, tail.mean_current(), settings.eq_current_complete, TAIL_POLLS, elapsed / 60)
                 break
 
             if elapsed > eq_timeout:
