@@ -826,5 +826,50 @@ class TestEssKeepCharged(unittest.TestCase):
         self.assertEqual(monitor.get_ess_state(), 10)
 
 
+class TestIsolationCheckHasSomethingToSee(unittest.TestCase):
+    """2026-10-04: fla-charge hands off at the live bus voltage. With ESS on
+    keep-charged the charger held the Trojans there, the banks never diverged,
+    and verify_relay_open failed the run with relay 2 open."""
+
+    def setUp(self):
+        self._tmp = os.path.join(os.path.dirname(__file__), "_snap_iso.json")
+        p = patch.object(takeover, "SNAPSHOT_FILE", self._tmp); p.start(); self.addCleanup(p.stop)
+        self.addCleanup(lambda: os.path.exists(self._tmp) and os.unlink(self._tmp))
+
+    def _handoff(self, safe_voltage, bus=27.0, verified=True):
+        order = []
+        with patch('takeover.aggregate_driver') as magg, patch('takeover.relay_control') as mrelay, \
+                patch('takeover.TempBatteryService') as MockTBS:
+            magg.stop.return_value = True
+            mrelay.open_relay.side_effect = lambda *a, **k: order.append("open") or True
+            mrelay.verify_relay_open.side_effect = lambda *a, **k: order.append("verify") or verified
+            temp = MagicMock(**{"register.return_value": True})
+            temp.set_charge_voltage.side_effect = lambda v: order.append(v)
+            MockTBS.return_value = temp
+            t = takeover.Takeover(MockMonitor(bms_instance=99, lfp_voltage=bus, relay_state=0),
+                                  MockStatus(), MagicMock(), "fla-charge", _states())
+            ok = t.hand_off_in(safe_voltage=safe_voltage, target_voltage=29.83)
+            self.assertEqual(ok, verified)
+        return order
+
+    def test_cvl_lifted_to_lfp_safe_between_open_and_verify(self):
+        self.assertEqual(self._handoff(27.0), ["open", 28.4, "verify", 29.83])
+
+    def test_probe_goes_down_when_the_bus_is_already_at_lfp_safe(self):
+        # LFP bank in absorption: no headroom below 28.4V to probe upwards.
+        order = self._handoff(28.4, bus=28.4)
+        self.assertEqual(order[:3], ["open", 27.4, "verify"])
+
+    def test_never_above_lfp_safe_before_isolation_is_verified(self):
+        for bus in (26.0, 27.0, 27.9, 28.0, 28.4, 28.8):
+            order = self._handoff(bus, bus=bus)
+            self.assertLessEqual(order[1], 28.4, bus)
+            self.assertGreaterEqual(abs(order[1] - bus), 0.5, bus)
+
+    def test_failed_check_does_not_leave_the_hold_on_the_probe_voltage(self):
+        order = self._handoff(27.0, bus=27.0, verified=False)
+        self.assertEqual(order, ["open", 28.4, "verify", 27.0])
+
+
 if __name__ == '__main__':
     unittest.main()
