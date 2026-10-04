@@ -32,7 +32,7 @@ class SimReboot(BaseException):
 
 
 class SimBoat:
-    def __init__(self, tmpdir, ess_state=10):
+    def __init__(self, tmpdir, ess_state=10, bus_voltage=26.9):
         self.t = 1_000_000.0
         self._t0 = self.t
         self.tmpdir = tmpdir
@@ -50,7 +50,7 @@ class SimBoat:
         self._systemcalc_down = False
         self._last_cvl = 27.0
         # plant
-        self.v_trojan = self.v_lfp = 26.9
+        self.v_trojan = self.v_lfp = bus_voltage   # 28.4 = LFP bank in absorption
         self.i_trojan = 0.0
         self.trojan_soc = 100.0
         self._tail = 40.0             # absorption tail current, decays at the target
@@ -58,7 +58,7 @@ class SimBoat:
         self.isolated_discharge_s = 0.0   # relay open AND Trojans discharging > 5A
         self.bms_lost_s = 0.0             # DVCC selects a BMS that is not running
         self.relay_open_s = 0.0
-        self.lfp_overvoltage_s = 0.0      # relay closed with the bus above LFP-safe 28.4V
+        self.lfp_overvoltage_s = 0.0      # relay closed while DVCC's CVL is above LFP-safe 28.4V
         self.min_v_trojan = self.v_trojan
         self.peak_v_trojan = self.v_trojan
         self.events = []                  # optional hooks: fn(sim) called every step
@@ -100,11 +100,15 @@ class SimBoat:
         minutes = dt / 60.0
         if self.relay == 1:
             self.i_trojan = 0.0   # the LFP bank carries the cycling
-            if self.v_trojan > 28.4:
+            if cvl is not None and cvl > 28.45:
                 self.lfp_overvoltage_s += dt
             self.v_trojan = self.v_lfp
         else:
             self.relay_open_s += dt
+            # On the Orion a full LFP bank barely moves (28.84V -> 28.13V in 11
+            # hours on 2026-10-04).
+            if self.v_lfp > 27.0:
+                self.v_lfp = max(27.0, self.v_lfp - 0.065 * minutes / 60)
             inverting = (not self.ac) or (self.ess_state != ESS_KEEP_CHARGED
                                            and self.trojan_soc > 20.0)
             charging = self.ac and cvl is not None and not inverting

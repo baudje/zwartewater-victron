@@ -12,6 +12,7 @@ the same subprocess. These tests guard against that regression.
 import os
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tests'))
@@ -95,6 +96,28 @@ class TestDbusMonitorSkipsTempService(unittest.TestCase):
         # The filter must catch the new neutral name.
         self.assertIn('"fla_temp"', src,
                       "dbus_monitor.get_lfp_soc must skip fla_temp service")
+
+
+class TestStaleCvlFile(unittest.TestCase):
+    """A CVL file left by a killed run must not be adopted by the next temp
+    battery: at 31.5V it would reach DVCC while relay 2 is still closed."""
+
+    def test_register_removes_a_leftover_cvl_file(self):
+        import tempfile
+        import temp_battery
+        path = os.path.join(tempfile.mkdtemp(), "fla_temp_cvl")
+        with open(path, "w") as f:
+            f.write("31.5")
+        seen = {}
+
+        def popen(*a, **k):
+            seen["file_present_at_launch"] = os.path.exists(path)
+            return MagicMock(**{"poll.return_value": None, "pid": 1})
+        with patch.object(temp_battery, "CVL_FILE", path), \
+                patch.object(temp_battery.subprocess, "Popen", side_effect=popen), \
+                patch.object(temp_battery.time, "sleep"):
+            self.assertTrue(temp_battery.TempBatteryService().register(28.4, 60.0))
+        self.assertFalse(seen["file_present_at_launch"])
 
 
 if __name__ == '__main__':

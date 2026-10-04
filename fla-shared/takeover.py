@@ -40,6 +40,10 @@ TEMP_SERVICE = "com.victronenergy.battery/100"
 # restore key on this.
 AGGREGATE_INSTANCE = 99
 TEMP_CHARGE_CURRENT = 60.0  # FLA recommended max bulk current
+# Isolation probe (hand_off_in step 6): lift the CVL to LFP_SAFE_CVL when the bus
+# is at least HEADROOM below it, else drop it DROP volts below the bus.
+ISOLATION_PROBE_HEADROOM = 0.5
+ISOLATION_PROBE_DROP = 1.0
 # /Settings/CGwacs/BatteryLife/State value for ESS "Keep batteries charged".
 ESS_KEEP_CHARGED = 9
 # After restart_systemcalc() returns, systemcalc's slow post-restart D-Bus scan
@@ -296,18 +300,26 @@ class Takeover:
 
         # 6. Open relay 2 (isolate the LFP bank) — only now that DVCC is the temp battery.
         self.status.update(state=self.states.disconnecting)
+        v_bus = self.monitor.get_lfp_voltage() or safe_voltage
         if not relay_control.open_relay(self.monitor):
             return self._fail("Failed to open relay 2")
         # The isolation check below needs the two banks to drift apart. With ESS
         # on keep-charged the charger holds the Trojans AT the temp battery CVL,
-        # so a safe voltage equal to the bus voltage (fla-charge) leaves both
-        # banks level and the check fails with the relay open (2026-10-04).
-        # Lift the CVL to the LFP-safe maximum first: the charger pulls the
-        # isolated Trojans up, and if the relay did not open the LFP bank only
-        # sees its normal absorption voltage.
-        if safe_voltage < LFP_SAFE_CVL:
-            self.temp_service.set_charge_voltage(LFP_SAFE_CVL)
+        # so a CVL equal to the bus voltage leaves both banks level and the check
+        # fails with the relay open (2026-10-04). Probe: move the CVL away from
+        # the bus voltage, up to the LFP-safe maximum when there is headroom,
+        # otherwise down (the charger backs off and the Orion load pulls the
+        # isolated Trojans down). Never above LFP_SAFE_CVL: if the relay did not
+        # open, the LFP bank must not see more than its absorption voltage.
+        if v_bus <= LFP_SAFE_CVL - ISOLATION_PROBE_HEADROOM:
+            probe = LFP_SAFE_CVL
+        else:
+            probe = v_bus - ISOLATION_PROBE_DROP
+        self.temp_service.set_charge_voltage(probe)
         if not relay_control.verify_relay_open(self.monitor):
+            # Don't leave a hold (possibly with the LFP still connected) pinned
+            # at the probe voltage: back to the gentlest known-safe level.
+            self.temp_service.set_charge_voltage(min(safe_voltage, v_bus))
             return self._fail("LFP not disconnected after relay open")
 
         # 7. Raise the DVCC ceiling and the temp battery CVL to the target.

@@ -97,6 +97,12 @@ class TempBatteryService:
         Returns True only if the subprocess is still alive after startup.
         D-Bus discovery is verified separately by the caller.
         """
+        # The subprocess adopts whatever CVL file it finds within 2s. One left by
+        # a killed run (31.5V) must not reach DVCC while relay 2 is still closed.
+        try:
+            os.unlink(CVL_FILE)
+        except OSError:
+            pass
         try:
             self._process = subprocess.Popen(
                 ["python3", PROCESS_SCRIPT, str(charge_voltage), str(charge_current),

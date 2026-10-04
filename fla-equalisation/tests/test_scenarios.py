@@ -11,6 +11,7 @@ import os
 import sys
 import unittest
 
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared', 'tests'))
@@ -21,32 +22,14 @@ dbus_mock_setup()
 import fla_equalisation
 from scenario_case import ScenarioCase
 from sim_boat import SimReboot
-
-
-class Settings:
-    """The equalisation settings, due now and with the time window wide open."""
-    eq_voltage = 31.5
-    eq_current_complete = 10.0
-    eq_timeout_hours = 2.5
-    float_voltage = 27.0
-    voltage_delta_max = 1.0
-    days_between = 90
-    start_hour, end_hour = 0, 24
-    lfp_soc_min = 95
-    enabled = True
-    run_now = False
-
-    def clear_run_now(self):
-        self.run_now = False
-
-    def _write(self, key, value):
-        setattr(self, key, value)
+from test_fla_equalisation import MockSettings
 
 
 class EqualisationCase(ScenarioCase):
     module = fla_equalisation
     service_class = "FlaEqualisationService"
-    settings_class = Settings
+    # due now, time window wide open
+    settings_class = staticmethod(lambda: MockSettings(start_hour=0, end_hour=24))
     last_run_attr = "LAST_EQ_FILE"
 
 
@@ -60,8 +43,9 @@ class TestEqualisationScenarios(EqualisationCase):
         self.assertEqual(sim.bms_lost_s, 0)
         self.assertTrue(os.path.exists(self.last_run), "equalisation recorded")
         self.assertEqual(self.alarms, [])
+        open_before = sim.relay_open_s
         self.tick(3)
-        self.assertEqual(sim.relay, 1, "no second run: the interval advanced")
+        self.assertEqual(sim.relay_open_s, open_before, "no second run: the interval advanced")
 
     def test_incident_2026_10_03_reboot_with_relay_open(self):
         """EQ starts, the Cerbo reboots just after relay 2 opened and the CVL was
@@ -118,6 +102,18 @@ class TestEqualisationScenarios(EqualisationCase):
         self.assertEqual(sim.bms_instance, 99)
         self.assertFalse(os.path.exists(self.last_run))
         self.assertTrue(self.alarms)
+
+
+class TestEqualisationWithLfpInAbsorption(EqualisationCase):
+    bus_voltage = 28.4
+
+    def test_isolation_is_proven_without_headroom_below_lfp_safe(self):
+        sim = self.sim
+        self.tick()
+        self.assert_back_to_normal()
+        self.assertGreaterEqual(sim.peak_v_trojan, 31.4)
+        self.assertTrue(os.path.exists(self.last_run))
+        self.assertEqual(self.alarms, [])
 
 
 if __name__ == '__main__':

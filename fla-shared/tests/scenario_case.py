@@ -34,6 +34,7 @@ class ScenarioCase(unittest.TestCase):
     service_class = None   # its service class name
     settings_class = None
     last_run_attr = None   # module attribute holding the last-run timestamp path
+    bus_voltage = 26.9     # bus at handoff; 28.4 = LFP bank in absorption
 
     def extra_patches(self):
         return []
@@ -41,7 +42,7 @@ class ScenarioCase(unittest.TestCase):
     def setUp(self):
         self.data = tempfile.mkdtemp(prefix="simboat-")   # stands in for /data
         self.addCleanup(shutil.rmtree, self.data, True)
-        self.sim = sim = SimBoat(self.data)
+        self.sim = sim = SimBoat(self.data, bus_voltage=self.bus_voltage)
         self.alarms = []
         self.last_run = os.path.join(self.data, "last_run")
 

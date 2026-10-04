@@ -9,6 +9,7 @@ import os
 import sys
 import unittest
 
+sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'fla-shared', 'tests'))
@@ -18,33 +19,14 @@ dbus_mock_setup()
 
 import fla_charge
 from scenario_case import ScenarioCase
-
-
-class Settings:
-    enabled = True
-    trojan_soc_trigger = 85
-    lfp_soc_transition = 95
-    lfp_cell_voltage_disconnect = 3.50
-    current_taper_threshold = 20.0
-    fla_bulk_voltage = 29.64
-    fla_absorption_complete_current = 10.0
-    fla_absorption_max_hours = 4.0
-    fla_float_voltage = 27.0
-    voltage_delta_max = 1.0
-    phase1_timeout_hours = 8.0
-    run_now = True   # the operator pressed Run Now
-
-    def clear_run_now(self):
-        self.run_now = False
-
-    def _write(self, key, value):
-        setattr(self, key, value)
+from test_fla_charge import MockChargeSettings
 
 
 class ChargeCase(ScenarioCase):
     module = fla_charge
     service_class = "FlaChargeService"
-    settings_class = Settings
+    # the operator pressed Run Now
+    settings_class = staticmethod(lambda: MockChargeSettings(run_now=True))
     last_run_attr = "LAST_CHARGE_FILE"
 
     def extra_patches(self):
@@ -79,6 +61,18 @@ class TestChargeScenarios(ChargeCase):
         self.assertLessEqual(sim.isolated_discharge_s, 300, "reconnected within minutes")
         self.assertFalse(os.path.exists(self.last_run), "not recorded as a charge")
         self.assertTrue(self.alarms)
+
+
+class TestChargeWithLfpInAbsorption(ChargeCase):
+    bus_voltage = 28.4
+
+    def test_isolation_is_proven_without_headroom_below_lfp_safe(self):
+        sim = self.sim
+        self.tick()
+        self.assert_back_to_normal()
+        self.assertGreaterEqual(sim.peak_v_trojan, 29.5)
+        self.assertTrue(os.path.exists(self.last_run))
+        self.assertEqual(self.alarms, [])
 
 
 if __name__ == '__main__':
