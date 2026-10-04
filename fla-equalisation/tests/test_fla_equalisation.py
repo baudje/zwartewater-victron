@@ -1085,12 +1085,29 @@ class TestIncident20261003Guards(unittest.TestCase):
         mwrite.assert_not_called()
         self.assertTrue(malarm.called)
 
-    def test_timeout_after_reaching_target_still_counts(self):
+    def test_timeout_after_holding_target_still_counts(self):
+        import itertools
         monitor = MockMonitor(trojan_voltage=31.5, trojan_current=30.0,
                               lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
-        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, [0, 10, 99999, 99999, 99999])
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, itertools.count(0, 30))
         self.assertTrue(result)
         mwrite.assert_called_once()
+
+    def test_briefly_touching_target_is_not_a_success(self):
+        import itertools
+        monitor = MockMonitor(trojan_current=30.0, lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        monitor.get_trojan_voltage = MagicMock(
+            side_effect=itertools.chain([31.5] * 4, itertools.repeat(27.0)))
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, itertools.count(0, 30))
+        self.assertFalse(result)
+        mwrite.assert_not_called()
+
+    def test_small_discharge_at_target_is_not_completion(self):
+        import itertools
+        monitor = MockMonitor(trojan_voltage=31.5, trojan_current=-1.0,
+                              lfp_voltage=26.9, relay_state=0, lfp_soc=96.0)
+        result, inst, mwrite, malarm, mclear, status, mt = self._run(monitor, itertools.count(0, 30))
+        self.assertGreater(mt.sleep.call_count, 10)   # did not "complete" on the first poll
 
 
 class TestRetryBackoff(unittest.TestCase):
@@ -1121,6 +1138,17 @@ class TestRetryBackoff(unittest.TestCase):
             svc.settings.run_now = True               # the operator can still force one
             svc._check()
             self.assertEqual(mthread.call_count, 2)
+
+    @patch('fla_equalisation.verify_idle_bms_selection')
+    @patch('fla_equalisation.lock_is_locked', return_value=True)
+    @patch('fla_equalisation.should_run', return_value=True)
+    def test_other_service_holding_the_lock_is_not_a_failed_run(self, msr, _lk, _g):
+        svc = self._service()
+        with patch('fla_equalisation.threading.Thread') as mthread:
+            svc._check()
+        mthread.assert_not_called()
+        msr.assert_not_called()                 # RunNow not consumed
+        self.assertEqual(svc._retry_after, 0.0)  # backoff not armed
 
 
 if __name__ == '__main__':

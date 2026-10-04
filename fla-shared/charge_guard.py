@@ -6,6 +6,9 @@ while the equalisation loop, reading abs(current), logged it as charging.
 
 DISCHARGE_LIMIT_A = -5.0  # below this the bank is feeding loads, not shunt noise
 DISCHARGE_POLLS = 4       # consecutive 30s polls (~2 min): rides out a load peak
+# A run that ends on its timeout only counts if the bank was held at the target
+# voltage this long (30s polls -> 30 min); one sample touching it is not a charge.
+MIN_POLLS_AT_TARGET = 60
 
 
 class DischargeGuard:
@@ -14,8 +17,12 @@ class DischargeGuard:
 
     def tripped(self, current):
         """Feed one current reading (A, + = charging). True once the bank has
-        been discharging for DISCHARGE_POLLS consecutive readings."""
-        if current is not None and current < DISCHARGE_LIMIT_A:
+        been discharging for DISCHARGE_POLLS readings in a row. An unreadable
+        reading (None) neither counts nor resets, so a flaky shunt cannot mask
+        a discharge."""
+        if current is None:
+            pass
+        elif current < DISCHARGE_LIMIT_A:
             self._count += 1
         else:
             self._count = 0

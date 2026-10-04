@@ -23,8 +23,8 @@ from gi.repository import GLib
 from dbus_monitor import DbusMonitor
 from temp_battery import recover_orphan_temp_battery, is_temp_battery_running
 from relay_control import verify_relay_still_open, startup_safety_check
-from charge_guard import DischargeGuard
-from lock import acquire as acquire_lock, release as release_lock
+from charge_guard import DischargeGuard, MIN_POLLS_AT_TARGET
+from lock import acquire as acquire_lock, release as release_lock, is_locked as lock_is_locked
 from run_history import append_run
 from temp_compensation import compensate as temp_compensate
 import alerting
@@ -274,7 +274,8 @@ def run_charge(settings, monitor, status):
         abs_timeout = settings.fla_absorption_max_hours * 3600
         i_trojan_none_count = 0
         discharge_guard = DischargeGuard()
-        reached_target = False
+        polls_at_target = 0
+        completed = False  # tail current reached at the target voltage
         failure = None  # set when the run reconnects but did not complete the charge
 
         while True:
@@ -349,8 +350,9 @@ def run_charge(settings, monitor, status):
 
             # Absorption complete — only after voltage reaches the target
             voltage_reached = v_trojan is not None and v_trojan >= (abs_voltage - 0.1)
-            reached_target = reached_target or voltage_reached
-            if voltage_reached and i_trojan is not None and abs(i_trojan) < settings.fla_absorption_complete_current:
+            polls_at_target += voltage_reached
+            if voltage_reached and i_trojan is not None and 0 <= i_trojan < settings.fla_absorption_complete_current:
+                completed = True
                 log.info("Absorption complete: V=%.1fV (target %.1fV), current %.1fA < %.1fA (%.0f min)",
                          v_trojan, abs_voltage, abs(i_trojan),
                          settings.fla_absorption_complete_current, elapsed / 60)
@@ -378,11 +380,11 @@ def run_charge(settings, monitor, status):
 
         # A timeout, AC loss or lost current reading below the target voltage is
         # not a completed charge: reconnect, but alarm and do not record it.
-        if failure is None and not reached_target and not aborted_by_operator:
-            failure = "FLA charge ended without reaching %.1fV (peak %.1fV)" % (
+        if (failure is None and not completed and not aborted_by_operator
+                and polls_at_target < MIN_POLLS_AT_TARGET):
+            failure = "FLA charge ended without holding %.1fV (peak %.1fV)" % (
                 abs_voltage, run_record["peak_trojan_voltage"] or 0)
         if failure:
-            status.update(state=STATE_ERROR)
             alerting.raise_alarm(failure, status_service=status)
 
         # === PHASE 4: Hand back — float-hold, voltage-match, close, teardown ===
@@ -435,7 +437,7 @@ def run_charge(settings, monitor, status):
 class FlaChargeService:
     """Persistent service that checks conditions and runs FLA charge."""
 
-    _retry_after = 0.0  # epoch seconds; scheduled runs wait until then after a failure
+    _retry_after = 0.0  # time.monotonic(); scheduled runs wait until then after a failure
 
     def __init__(self):
         # Build the monitor first (cheap), read the live relay state, then do
@@ -593,8 +595,10 @@ class FlaChargeService:
                 self._update_idle_status()
             # After a failed run, wait before retrying on the schedule (2026-10-03:
             # run 3 started 3 seconds after run 2 failed). RunNow still forces one.
-            backing_off = time.time() < self._retry_after and not self.settings.run_now
-            if not backing_off and should_run(self.settings, self.monitor):
+            backing_off = time.monotonic() < self._retry_after and not self.settings.run_now
+            # The other service mid-operation is not a failed run of ours: skip
+            # the tick without consuming RunNow or arming the backoff.
+            if not backing_off and not lock_is_locked() and should_run(self.settings, self.monitor):
                 self._running = True
                 self._failed = False
                 _engine.clear_run_now()
@@ -612,12 +616,12 @@ class FlaChargeService:
                         log.exception("Worker thread error: %s", e)
                         self._failed = True
                     finally:
+                        if not success:  # armed BEFORE _running clears: no tick can slip in
+                            self._retry_after = time.monotonic() + RETRY_BACKOFF_SEC
                         self._running = False
                         if success:
                             self._failed = False
                             GLib.idle_add(self._update_idle_status)
-                        else:
-                            self._retry_after = time.time() + RETRY_BACKOFF_SEC
 
                 threading.Thread(target=_worker, daemon=True).start()
         except Exception as e:

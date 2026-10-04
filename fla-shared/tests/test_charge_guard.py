@@ -26,6 +26,12 @@ class TestDischargeGuard(unittest.TestCase):
         self.assertFalse(g.tripped(20.0))
         self.assertFalse(g.tripped(-45.0))
 
+    def test_unreadable_reading_does_not_reset_the_count(self):
+        # A flaky shunt (every few reads time out) must not mask a discharge.
+        g = DischargeGuard()
+        readings = [-45.0, None] * DISCHARGE_POLLS
+        self.assertTrue(any(g.tripped(i) for i in readings))
+
     def test_unreadable_current_does_not_trip(self):
         g = DischargeGuard()
         self.assertFalse(any(g.tripped(None) for _ in range(DISCHARGE_POLLS * 2)))
